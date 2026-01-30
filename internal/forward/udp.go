@@ -2,20 +2,13 @@ package forward
 
 import (
 	"context"
+	"io"
 	"net"
 	"paqet/internal/flog"
 	"paqet/internal/pkg/buffer"
 	"paqet/internal/tnet"
-	"sync"
 	"time"
 )
-
-var uPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 32*1024)
-		return &b
-	},
-}
 
 func (f *Forward) listenUDP(ctx context.Context) {
 	laddr, err := net.ResolveUDPAddr("udp", f.listenAddr)
@@ -51,9 +44,10 @@ func (f *Forward) listenUDP(ctx context.Context) {
 }
 
 func (f *Forward) handleUDPPacket(ctx context.Context, conn *net.UDPConn) error {
-	bufp := uPool.Get().(*[]byte)
-	defer uPool.Put(bufp)
+	bufp := buffer.UPool.Get().(*[]byte)
+	defer buffer.UPool.Put(bufp)
 	buf := *bufp
+
 	n, caddr, err := conn.ReadFromUDP(buf)
 	if err != nil {
 		return err
@@ -83,10 +77,13 @@ func (f *Forward) handleUDPPacket(ctx context.Context, conn *net.UDPConn) error 
 }
 
 func (f *Forward) handleUDPStrm(ctx context.Context, k uint64, strm tnet.Strm, conn *net.UDPConn, caddr *net.UDPAddr) {
+	bufp := buffer.UPool.Get().(*[]byte)
 	defer func() {
+		buffer.UPool.Put(bufp)
 		flog.Debugf("UDP stream %d closed for %s -> %s", strm.SID(), caddr, f.targetAddr)
 		f.client.CloseUDP(k)
 	}()
+	buf := *bufp
 
 	for {
 		select {
@@ -95,11 +92,21 @@ func (f *Forward) handleUDPStrm(ctx context.Context, k uint64, strm tnet.Strm, c
 		default:
 		}
 		strm.SetDeadline(time.Now().Add(8 * time.Second))
-		err := buffer.CopyU(strm, conn, caddr)
+		err := CopyU(strm, conn, caddr, buf)
 		strm.SetDeadline(time.Time{})
 		if err != nil {
 			flog.Errorf("UDP stream %d failed for %s -> %s: %v", strm.SID(), caddr, f.targetAddr, err)
 			return
 		}
 	}
+}
+
+func CopyU(dst io.ReadWriter, src *net.UDPConn, addr *net.UDPAddr, buf []byte) error {
+	n, err := dst.Read(buf)
+	if err != nil {
+		return err
+	}
+
+	_, err = src.WriteToUDP(buf[:n], addr)
+	return err
 }
