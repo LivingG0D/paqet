@@ -67,10 +67,10 @@ func (k *KCP) setDefaults(role string) {
 	}
 
 	if k.Smuxbuf == 0 {
-		k.Smuxbuf = 512 * 1024
+		k.Smuxbuf = 4 * 1024 * 1024 // 4MB: high-concurrency needs more buffering
 	}
 	if k.Streambuf == 0 {
-		k.Streambuf = 64 * 1024
+		k.Streambuf = 256 * 1024 // 256KB per stream
 	}
 }
 
