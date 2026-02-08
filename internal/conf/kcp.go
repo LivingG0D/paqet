@@ -28,6 +28,8 @@ type KCP struct {
 	Smuxbuf   int `yaml:"smuxbuf"`
 	Streambuf int `yaml:"streambuf"`
 
+	DSCP int `yaml:"dscp"`
+
 	Block kcp.BlockCrypt `yaml:"-"`
 }
 
@@ -41,16 +43,16 @@ func (k *KCP) setDefaults(role string) {
 
 	if k.Rcvwnd == 0 {
 		if role == "server" {
-			k.Rcvwnd = 1024
-		} else {
 			k.Rcvwnd = 512
+		} else {
+			k.Rcvwnd = 256
 		}
 	}
 	if k.Sndwnd == 0 {
 		if role == "server" {
-			k.Sndwnd = 1024
-		} else {
 			k.Sndwnd = 512
+		} else {
+			k.Sndwnd = 256
 		}
 	}
 
@@ -66,10 +68,10 @@ func (k *KCP) setDefaults(role string) {
 	}
 
 	if k.Smuxbuf == 0 {
-		k.Smuxbuf = 4 * 1024 * 1024
+		k.Smuxbuf = 2 * 1024 * 1024
 	}
 	if k.Streambuf == 0 {
-		k.Streambuf = 2 * 1024 * 1024
+		k.Streambuf = 1024 * 1024
 	}
 }
 
@@ -110,6 +112,10 @@ func (k *KCP) validate() []error {
 	}
 	if k.Streambuf < 1024 {
 		errors = append(errors, fmt.Errorf("KCP streambuf must be >= 1024 bytes"))
+	}
+
+	if k.DSCP < 0 || k.DSCP > 63 {
+		errors = append(errors, fmt.Errorf("KCP DSCP must be between 0-63"))
 	}
 
 	return errors

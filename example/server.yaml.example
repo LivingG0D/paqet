@@ -38,7 +38,7 @@ network:
 # Transport protocol configuration
 transport:
   protocol: "kcp"  # Transport protocol (currently only "kcp" supported)
-  conn: 1          # Number of connections (1-256, default: 1)
+  conn: 4          # Number of connections (1-256, default: 1)
   
   # tcpbuf: 8192   # TCP buffer size in bytes
   # udpbuf: 4096   # UDP buffer size in bytes
@@ -75,16 +75,17 @@ transport:
                               # Setting true reduces latency but increases bandwidth usage
 
     # mtu: 1350              # Maximum transmission unit (50-1500)
-    # rcvwnd: 1024           # Receive window size (default for server)
-    # sndwnd: 1024           # Send window size (default for server)
+    # rcvwnd: 512            # Receive window size (default for server)
+    # sndwnd: 512            # Send window size (default for server)
 
     # Encryption settings  
     # block: "aes"                    # Encryption: aes, aes-128, aes-128-gcm, aes-192, salsa20, blowfish, twofish, cast5, 3des, tea, xtea, xor, sm4, none.
     key: "your-secret-key-here"       # CHANGE ME: Secret key (must match client)
 
     # Buffer settings (optional)
-    # smuxbuf: 4194304       # 4MB SMUX buffer
-    # streambuf: 2097152     # 2MB stream buffer
+    # smuxbuf: 2097152       # 2MB SMUX buffer
+    # streambuf: 1048576     # 1MB stream buffer
+    # dscp: 0                # DSCP value (0-63, default 0)
 
 # Optional Forward Error Correction (FEC) - currently disabled
 # Use these only if you need FEC for very lossy networks:

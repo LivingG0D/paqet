@@ -97,7 +97,7 @@ if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN
 
             # --- Step 5: Apply standard optimization patches ---
             sed -i 's/mode: .*/mode: "fast"/' "$INSTALL_DIR/config.yaml"
-            sed -i 's/conn: .*/conn: 16/' "$INSTALL_DIR/config.yaml"
+            sed -i 's/conn: .*/conn: 4/' "$INSTALL_DIR/config.yaml"
             sed -i 's/block: .*/block: "xor"/' "$INSTALL_DIR/config.yaml"
             sed -i 's/mtu: .*/mtu: 1200/' "$INSTALL_DIR/config.yaml"
             sed -i 's/sockbuf: .*/sockbuf: 16777216/' "$INSTALL_DIR/config.yaml"
@@ -322,7 +322,7 @@ network:
     sockbuf: 16777216
 transport:
   protocol: "kcp"
-  conn: 16
+  conn: 4
   kcp:
     mode: "$KCP_MODE"
     mtu: $KCP_MTU
@@ -397,7 +397,7 @@ server:
   addr: "$SERVER_IP:$SERVER_PORT"
 transport:
   protocol: "kcp"
-  conn: 16
+  conn: 4
   kcp:
     mode: "$KCP_MODE"
     mtu: $KCP_MTU

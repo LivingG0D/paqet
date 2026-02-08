@@ -16,13 +16,13 @@ func aplConf(conn *kcp.UDPSession, cfg *conf.KCP) {
 		noDelay, interval, resend, noCongestion = 0, 40, 2, 1
 		wDelay, ackNoDelay = true, false
 	case "fast":
-		noDelay, interval, resend, noCongestion = 0, 30, 2, 1
+		noDelay, interval, resend, noCongestion = 1, 30, 2, 1
 		wDelay, ackNoDelay = true, false
 	case "fast2":
 		noDelay, interval, resend, noCongestion = 1, 20, 2, 1
 		wDelay, ackNoDelay = false, true
 	case "fast3":
-		noDelay, interval, resend, noCongestion = 1, 10, 2, 1
+		noDelay, interval, resend, noCongestion = 1, 15, 2, 1
 		wDelay, ackNoDelay = false, true
 	case "manual":
 		noDelay, interval, resend, noCongestion = cfg.NoDelay, cfg.Interval, cfg.Resend, cfg.NoCongestion
@@ -34,14 +34,14 @@ func aplConf(conn *kcp.UDPSession, cfg *conf.KCP) {
 	conn.SetMtu(cfg.MTU)
 	conn.SetWriteDelay(wDelay)
 	conn.SetACKNoDelay(ackNoDelay)
-	conn.SetDSCP(46)
+	conn.SetDSCP(cfg.DSCP)
 }
 
 func smuxConf(cfg *conf.KCP) *smux.Config {
 	var sconf = smux.DefaultConfig()
 	sconf.Version = 2
-	sconf.KeepAliveInterval = 2 * time.Second
-	sconf.KeepAliveTimeout = 8 * time.Second
+	sconf.KeepAliveInterval = 10 * time.Second
+	sconf.KeepAliveTimeout = 30 * time.Second
 	sconf.MaxFrameSize = 65535
 	sconf.MaxReceiveBuffer = cfg.Smuxbuf
 	sconf.MaxStreamBuffer = cfg.Streambuf
