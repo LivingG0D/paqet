@@ -33,7 +33,7 @@ type KCP struct {
 
 func (k *KCP) setDefaults(role string) {
 	if k.Mode == "" {
-		k.Mode = "fast"
+		k.Mode = "fast3"
 	}
 	if k.MTU == 0 {
 		k.MTU = 1350
@@ -54,12 +54,10 @@ func (k *KCP) setDefaults(role string) {
 		}
 	}
 
-	// if k.Dshard == 0 {
-	// 	k.Dshard = 10
-	// }
-	// if k.Pshard == 0 {
-	// 	k.Pshard = 3
-	// }
+	if k.Dshard == 0 && k.Pshard == 0 {
+		k.Dshard = 10
+		k.Pshard = 3
+	}
 
 	if k.Block_ == "" {
 		k.Block_ = "xor"
