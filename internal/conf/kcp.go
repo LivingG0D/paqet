@@ -56,7 +56,7 @@ func (k *KCP) setDefaults(role string) {
 
 	if k.Dshard == 0 && k.Pshard == 0 {
 		k.Dshard = 10
-		k.Pshard = 3
+		k.Pshard = 1
 	}
 
 	if k.Block_ == "" {

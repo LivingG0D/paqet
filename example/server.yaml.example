@@ -81,6 +81,12 @@ transport:
     # rcvwnd: 512            # Receive window size (default for server)
     # sndwnd: 512            # Send window size (default for server)
 
+    # Forward Error Correction (FEC) - recovers lost packets without retransmission
+    # dshard: 10             # Data shards (default: 10)
+    # pshard: 1              # Parity shards (default: 1, set both to 0 to disable)
+    #                        # Recovers up to 'pshard' lost packets per 'dshard' sent
+    #                        # Bandwidth overhead = pshard/dshard (e.g. 1/10 = 10%)
+
     # Encryption settings  
     # block: "aes"                    # Encryption: aes, aes-128, aes-128-gcm, aes-192, salsa20, blowfish, twofish, cast5, 3des, tea, xtea, xor, sm4, none.
     key: "your-secret-key-here"       # CHANGE ME: Secret key (must match client)
@@ -88,11 +94,6 @@ transport:
     # Buffer settings (optional)
     # smuxbuf: 2097152       # 2MB SMUX buffer
     # streambuf: 1048576     # 1MB stream buffer
-
-# Optional Forward Error Correction (FEC) - currently disabled
-# Use these only if you need FEC for very lossy networks:
-#   dshard: 10    # Data shards for FEC  
-#   pshard: 3     # Parity shards for FEC
 
 # Important: Server Firewall Configuration Required!
 # 
