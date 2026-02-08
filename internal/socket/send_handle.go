@@ -1,8 +1,10 @@
 package socket
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"math/big"
 	"net"
 	"paqet/internal/conf"
 	"paqet/internal/pkg/hash"
@@ -30,16 +32,24 @@ type SendHandle struct {
 	srcIPv6     net.IP
 	srcIPv6RHWA net.HardwareAddr
 	srcPort     uint16
+	dscp        uint8
 	synOptions  []layers.TCPOption
 	ackOptions  []layers.TCPOption
-	time        uint32
+	baseTime    uint32
 	tsCounter   uint32
+	seqSeed     uint32
 	tcpF        TCPF
 	ethPool     sync.Pool
 	ipv4Pool    sync.Pool
 	ipv6Pool    sync.Pool
 	tcpPool     sync.Pool
 	bufPool     sync.Pool
+}
+
+// cryptoRandUint32 returns a crypto/rand uint32 for unpredictable seeds.
+func cryptoRandUint32() uint32 {
+	n, _ := rand.Int(rand.Reader, big.NewInt(1<<32))
+	return uint32(n.Uint64())
 }
 
 func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
@@ -55,8 +65,12 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 		}
 	}
 
+	// MSS: randomize between 1360–1460 to avoid static fingerprint
+	mssVal := 1360 + int(cryptoRandUint32()%101)
+	mssBytes := []byte{byte(mssVal >> 8), byte(mssVal & 0xFF)}
+
 	synOptions := []layers.TCPOption{
-		{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: []byte{0x05, 0xb4}},
+		{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: mssBytes},
 		{OptionType: layers.TCPOptionKindSACKPermitted, OptionLength: 2},
 		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: make([]byte, 8)},
 		{OptionType: layers.TCPOptionKindNop},
@@ -72,10 +86,12 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 	sh := &SendHandle{
 		handle:     handle,
 		srcPort:    uint16(cfg.Port),
+		dscp:       uint8(cfg.PCAP.DSCP),
 		synOptions: synOptions,
 		ackOptions: ackOptions,
+		baseTime:   uint32(time.Now().UnixNano() / int64(time.Millisecond)),
+		seqSeed:    cryptoRandUint32(),
 		tcpF:       TCPF{tcpF: iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF}, clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
-		time:       uint32(time.Now().UnixNano() / int64(time.Millisecond)),
 		ethPool: sync.Pool{
 			New: func() any {
 				return &layers.Ethernet{SrcMAC: cfg.Interface.HardwareAddr}
@@ -115,11 +131,15 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 
 func (h *SendHandle) buildIPv4Header(dstIP net.IP) *layers.IPv4 {
 	ip := h.ipv4Pool.Get().(*layers.IPv4)
+	// TOS: DSCP value shifted left 2 bits (ECN=0), default 0 = normal traffic
+	tos := h.dscp << 2
+	// TTL: jitter 63–65 to avoid static fingerprint
+	ttl := uint8(63 + cryptoRandUint32()%3)
 	*ip = layers.IPv4{
 		Version:  4,
 		IHL:      5,
-		TOS:      184,
-		TTL:      64,
+		TOS:      tos,
+		TTL:      ttl,
 		Flags:    layers.IPv4DontFragment,
 		Protocol: layers.IPProtocolTCP,
 		SrcIP:    h.srcIPv4,
@@ -130,10 +150,13 @@ func (h *SendHandle) buildIPv4Header(dstIP net.IP) *layers.IPv4 {
 
 func (h *SendHandle) buildIPv6Header(dstIP net.IP) *layers.IPv6 {
 	ip := h.ipv6Pool.Get().(*layers.IPv6)
+	tc := h.dscp << 2
+	// HopLimit: jitter 63–65
+	hl := uint8(63 + cryptoRandUint32()%3)
 	*ip = layers.IPv6{
 		Version:      6,
-		TrafficClass: 184,
-		HopLimit:     64,
+		TrafficClass: tc,
+		HopLimit:     hl,
 		NextHeader:   layers.IPProtocolTCP,
 		SrcIP:        h.srcIPv6,
 		DstIP:        dstIP,
@@ -143,32 +166,39 @@ func (h *SendHandle) buildIPv6Header(dstIP net.IP) *layers.IPv6 {
 
 func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF) *layers.TCP {
 	tcp := h.tcpPool.Get().(*layers.TCP)
+	// Window: randomize between 64240–65535 to avoid static fingerprint
+	window := uint16(64240 + cryptoRandUint32()%1296)
 	*tcp = layers.TCP{
 		SrcPort: layers.TCPPort(h.srcPort),
 		DstPort: layers.TCPPort(dstPort),
 		FIN:     f.FIN, SYN: f.SYN, RST: f.RST, PSH: f.PSH, ACK: f.ACK, URG: f.URG, ECE: f.ECE, CWR: f.CWR, NS: f.NS,
-		Window: 65535,
+		Window: window,
 	}
 
 	counter := atomic.AddUint32(&h.tsCounter, 1)
-	tsVal := h.time + (counter >> 3)
+	// Timestamp: base + counter-derived value + random jitter (0–7ms)
+	jitter := cryptoRandUint32() % 8
+	tsVal := h.baseTime + (counter >> 3) + jitter
 	if f.SYN {
 		binary.BigEndian.PutUint32(h.synOptions[2].OptionData[0:4], tsVal)
 		binary.BigEndian.PutUint32(h.synOptions[2].OptionData[4:8], 0)
 		tcp.Options = h.synOptions
-		tcp.Seq = 1 + (counter & 0x7)
+		// Seq: seed-based + counter with jitter
+		tcp.Seq = h.seqSeed + counter*1461 + cryptoRandUint32()%64
 		tcp.Ack = 0
 		if f.ACK {
 			tcp.Ack = tcp.Seq + 1
 		}
 	} else {
-		tsEcr := tsVal - (counter%200 + 50)
+		tsEcr := tsVal - (counter%200 + 50) - cryptoRandUint32()%10
 		binary.BigEndian.PutUint32(h.ackOptions[2].OptionData[0:4], tsVal)
 		binary.BigEndian.PutUint32(h.ackOptions[2].OptionData[4:8], tsEcr)
 		tcp.Options = h.ackOptions
-		seq := h.time + (counter << 7)
+		// Seq/Ack: seed-based with realistic-looking increments and jitter
+		dataLen := cryptoRandUint32()%1400 + 100
+		seq := h.seqSeed + counter*1461 + cryptoRandUint32()%64
 		tcp.Seq = seq
-		tcp.Ack = seq - (counter & 0x3FF) + 1400
+		tcp.Ack = seq - dataLen + cryptoRandUint32()%32
 	}
 
 	return tcp

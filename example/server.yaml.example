@@ -33,7 +33,10 @@ network:
 
   # PCAP settings (optional - will use defaults)
   # pcap:
-    # sockbuf: 8388608                         # 8MB buffer (default for server)
+    # sockbuf: 16777216                       # 16MB buffer (default for server)
+    # promisc: false                          # Promiscuous mode (default: false, saves CPU)
+    # snaplen: 1600                           # Capture length in bytes (default: 1600)
+    # dscp: 0                                 # DSCP value for IP headers (0-63, default: 0)
 
 # Transport protocol configuration
 transport:
@@ -85,7 +88,6 @@ transport:
     # Buffer settings (optional)
     # smuxbuf: 2097152       # 2MB SMUX buffer
     # streambuf: 1048576     # 1MB stream buffer
-    # dscp: 0                # DSCP value (0-63, default 0)
 
 # Optional Forward Error Correction (FEC) - currently disabled
 # Use these only if you need FEC for very lossy networks:

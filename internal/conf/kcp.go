@@ -28,8 +28,6 @@ type KCP struct {
 	Smuxbuf   int `yaml:"smuxbuf"`
 	Streambuf int `yaml:"streambuf"`
 
-	DSCP int `yaml:"dscp"`
-
 	Block kcp.BlockCrypt `yaml:"-"`
 }
 
@@ -112,10 +110,6 @@ func (k *KCP) validate() []error {
 	}
 	if k.Streambuf < 1024 {
 		errors = append(errors, fmt.Errorf("KCP streambuf must be >= 1024 bytes"))
-	}
-
-	if k.DSCP < 0 || k.DSCP > 63 {
-		errors = append(errors, fmt.Errorf("KCP DSCP must be between 0-63"))
 	}
 
 	return errors

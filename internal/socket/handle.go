@@ -26,11 +26,11 @@ func newHandle(cfg *conf.Network) (*pcap.Handle, error) {
 		return nil, fmt.Errorf("failed to set pcap buffer size to %d: %v", cfg.PCAP.Sockbuf, err)
 	}
 
-	if err = inactive.SetSnapLen(65536); err != nil {
-		return nil, fmt.Errorf("failed to set pcap snap length: %v", err)
+	if err = inactive.SetSnapLen(cfg.PCAP.SnapLen); err != nil {
+		return nil, fmt.Errorf("failed to set pcap snap length to %d: %v", cfg.PCAP.SnapLen, err)
 	}
-	if err = inactive.SetPromisc(true); err != nil {
-		return nil, fmt.Errorf("failed to enable promiscuous mode: %v", err)
+	if err = inactive.SetPromisc(cfg.PCAP.Promisc); err != nil {
+		return nil, fmt.Errorf("failed to set promiscuous mode: %v", err)
 	}
 	if err = inactive.SetTimeout(pcap.BlockForever); err != nil {
 		return nil, fmt.Errorf("failed to set pcap timeout: %v", err)
