@@ -96,13 +96,16 @@ if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN
             fi
 
             # --- Step 5: Apply standard optimization patches ---
-            sed -i 's/mode: .*/mode: "fast"/' "$INSTALL_DIR/config.yaml"
-            sed -i 's/conn: .*/conn: 4/' "$INSTALL_DIR/config.yaml"
+            sed -i 's/conn: .*/conn: 8/' "$INSTALL_DIR/config.yaml"
             sed -i 's/block: .*/block: "xor"/' "$INSTALL_DIR/config.yaml"
             sed -i 's/mtu: .*/mtu: 1200/' "$INSTALL_DIR/config.yaml"
             sed -i 's/sockbuf: .*/sockbuf: 16777216/' "$INSTALL_DIR/config.yaml"
+            # Disable FEC: remove old dshard/pshard and add dshard=0/pshard=0
+            sed -i '/^\s*dshard:/d' "$INSTALL_DIR/config.yaml"
+            sed -i '/^\s*pshard:/d' "$INSTALL_DIR/config.yaml"
+            sed -i '/block:/a\    dshard: 0\n    pshard: 0' "$INSTALL_DIR/config.yaml"
             
-            echo -e "${GREEN}Configuration migrated and optimized (fast mode, 4 conns, XOR, 16MB buffer).${NC}"
+            echo -e "${GREEN}Configuration migrated (fast mode, 8 conns, XOR, FEC off, 16MB buffer).${NC}"
         fi
     else
         echo -e "${BLUE}Stopping and removing existing service...${NC}"
@@ -301,6 +304,49 @@ KCP_MODE=${KCP_MODE:-"fast"}
 read -r -p "MTU Size (default 1200, try 1200 if unstable): " KCP_MTU < /dev/tty
 KCP_MTU=${KCP_MTU:-1200}
 
+# Encryption Selection
+echo -e "\n${BLUE}Encryption${NC}"
+echo "Choose encryption for KCP packets (MUST match on both sides):"
+echo ""
+echo "  ${GREEN}Recommended:${NC}"
+echo "    xor       - XOR cipher. Very fast, low CPU. Obfuscates headers for DPI bypass. (DEFAULT)"
+echo "    none      - No encryption. Zero CPU cost. Use when V2Ray/tunnel already encrypts."
+echo ""
+echo "  ${BLUE}Standard:${NC}"
+echo "    aes       - AES-256 (auto key size). Strong, hardware-accelerated on modern CPUs."
+echo "    aes-128   - AES-128. Slightly faster than AES-256, still very strong."
+echo "    aes-192   - AES-192. Middle ground between AES-128 and AES-256."
+echo "    aes-128-gcm - AES-128-GCM. Authenticated encryption (integrity + confidentiality)."
+echo "    salsa20   - Salsa20 stream cipher. Fast, constant-time. Good for DPI evasion."
+echo ""
+echo "  ${CYAN}Specialized:${NC}"
+echo "    sm4       - Chinese national standard. 128-bit block cipher."
+echo "    blowfish  - Legacy. Fast, variable key length."
+echo "    twofish   - AES finalist. Strong, but slower than AES."
+echo "    cast5     - 128-bit. Used in older PGP."
+echo "    3des      - Triple DES. Legacy, slow. Not recommended."
+echo "    tea/xtea  - Tiny Encryption Algorithm. Simple, compact."
+echo "    null      - Truly null (no processing at all). Debug only."
+echo ""
+read -r -p "Encryption [xor/none/aes/salsa20/...] (default xor): " KCP_BLOCK < /dev/tty
+KCP_BLOCK=${KCP_BLOCK:-"xor"}
+
+# FEC Selection
+echo -e "\n${BLUE}Forward Error Correction (FEC)${NC}"
+echo "FEC adds redundancy to recover lost packets without retransmission."
+echo "  ON  (dshard=10, pshard=1) — 10% bandwidth overhead, better on lossy networks"
+echo "  OFF (dshard=0, pshard=0)  — no overhead, recommended when using V2Ray tunnel (DEFAULT)"
+read -r -p "Enable FEC? [y/N]: " FEC_ENABLE < /dev/tty
+if [[ "$FEC_ENABLE" =~ ^[Yy]$ ]]; then
+    KCP_DSHARD=10
+    KCP_PSHARD=1
+    echo -e "${GREEN}FEC enabled (dshard=10, pshard=1)${NC}"
+else
+    KCP_DSHARD=0
+    KCP_PSHARD=0
+    echo -e "${GREEN}FEC disabled${NC}"
+fi
+
 if [ "$ROLE_OPT" == "1" ]; then
     # --- SERVER CONFIGURATION ---
     ROLE="server"
@@ -322,12 +368,14 @@ network:
     sockbuf: 16777216
 transport:
   protocol: "kcp"
-  conn: 4
+  conn: 8
   kcp:
     mode: "$KCP_MODE"
     mtu: $KCP_MTU
     key: "$CFG_KEY"
-    block: "xor"
+    block: "$KCP_BLOCK"
+    dshard: $KCP_DSHARD
+    pshard: $KCP_PSHARD
 EOF
 
     echo -e "${GREEN}Config created at $CONFIG_FILE${NC}"
@@ -397,12 +445,14 @@ server:
   addr: "$SERVER_IP:$SERVER_PORT"
 transport:
   protocol: "kcp"
-  conn: 4
+  conn: 8
   kcp:
     mode: "$KCP_MODE"
     mtu: $KCP_MTU
     key: "$CFG_KEY"
-    block: "xor"
+    block: "$KCP_BLOCK"
+    dshard: $KCP_DSHARD
+    pshard: $KCP_PSHARD
 EOF
 
     if [ "$CLIENT_MODE" == "1" ]; then

@@ -54,13 +54,9 @@ func (k *KCP) setDefaults(role string) {
 		}
 	}
 
-	// FEC defaults: dshard=10, pshard=1
+	// FEC disabled by default: saves 10% bandwidth per connection.
 	// WARNING: FEC changes KCP packet format — both sides MUST match.
-	// Never disable without coordinated rollout to ALL clients.
-	if k.Dshard == 0 && k.Pshard == 0 {
-		k.Dshard = 10
-		k.Pshard = 1
-	}
+	// Users can enable FEC by setting dshard/pshard in config (e.g. dshard: 10, pshard: 1).
 
 	if k.Block_ == "" {
 		k.Block_ = "xor" // XOR is required for DPI bypass — obfuscates KCP headers
