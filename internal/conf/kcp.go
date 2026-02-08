@@ -41,16 +41,16 @@ func (k *KCP) setDefaults(role string) {
 
 	if k.Rcvwnd == 0 {
 		if role == "server" {
-			k.Rcvwnd = 512
+			k.Rcvwnd = 2048
 		} else {
-			k.Rcvwnd = 256
+			k.Rcvwnd = 1024
 		}
 	}
 	if k.Sndwnd == 0 {
 		if role == "server" {
-			k.Sndwnd = 512
+			k.Sndwnd = 2048
 		} else {
-			k.Sndwnd = 256
+			k.Sndwnd = 1024
 		}
 	}
 
@@ -62,14 +62,14 @@ func (k *KCP) setDefaults(role string) {
 	// }
 
 	if k.Block_ == "" {
-		k.Block_ = "aes"
+		k.Block_ = "xor"
 	}
 
 	if k.Smuxbuf == 0 {
-		k.Smuxbuf = 2 * 1024 * 1024
+		k.Smuxbuf = 512 * 1024
 	}
 	if k.Streambuf == 0 {
-		k.Streambuf = 1024 * 1024
+		k.Streambuf = 64 * 1024
 	}
 }
 

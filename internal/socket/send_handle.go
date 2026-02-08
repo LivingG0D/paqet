@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"math/big"
+	randv2 "math/rand/v2"
 	"net"
 	"paqet/internal/conf"
 	"paqet/internal/pkg/hash"
@@ -46,10 +46,16 @@ type SendHandle struct {
 	bufPool     sync.Pool
 }
 
-// cryptoRandUint32 returns a crypto/rand uint32 for unpredictable seeds.
-func cryptoRandUint32() uint32 {
-	n, _ := rand.Int(rand.Reader, big.NewInt(1<<32))
-	return uint32(n.Uint64())
+// fastRand is a per-SendHandle PRNG seeded from crypto/rand.
+// Avoids kernel syscalls on every packet while maintaining unpredictability.
+var fastRand = func() *randv2.Rand {
+	var seed [32]byte
+	rand.Read(seed[:])
+	return randv2.New(randv2.NewChaCha8(seed))
+}()
+
+func fastRandUint32() uint32 {
+	return fastRand.Uint32()
 }
 
 func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
@@ -66,7 +72,7 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 	}
 
 	// MSS: randomize between 1360–1460 to avoid static fingerprint
-	mssVal := 1360 + int(cryptoRandUint32()%101)
+	mssVal := 1360 + int(fastRandUint32()%101)
 	mssBytes := []byte{byte(mssVal >> 8), byte(mssVal & 0xFF)}
 
 	synOptions := []layers.TCPOption{
@@ -90,7 +96,7 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 		synOptions: synOptions,
 		ackOptions: ackOptions,
 		baseTime:   uint32(time.Now().UnixNano() / int64(time.Millisecond)),
-		seqSeed:    cryptoRandUint32(),
+		seqSeed:    fastRandUint32(),
 		tcpF:       TCPF{tcpF: iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF}, clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
 		ethPool: sync.Pool{
 			New: func() any {
@@ -134,7 +140,7 @@ func (h *SendHandle) buildIPv4Header(dstIP net.IP) *layers.IPv4 {
 	// TOS: DSCP value shifted left 2 bits (ECN=0), default 0 = normal traffic
 	tos := h.dscp << 2
 	// TTL: jitter 63–65 to avoid static fingerprint
-	ttl := uint8(63 + cryptoRandUint32()%3)
+	ttl := uint8(63 + fastRandUint32()%3)
 	*ip = layers.IPv4{
 		Version:  4,
 		IHL:      5,
@@ -152,7 +158,7 @@ func (h *SendHandle) buildIPv6Header(dstIP net.IP) *layers.IPv6 {
 	ip := h.ipv6Pool.Get().(*layers.IPv6)
 	tc := h.dscp << 2
 	// HopLimit: jitter 63–65
-	hl := uint8(63 + cryptoRandUint32()%3)
+	hl := uint8(63 + fastRandUint32()%3)
 	*ip = layers.IPv6{
 		Version:      6,
 		TrafficClass: tc,
@@ -167,7 +173,7 @@ func (h *SendHandle) buildIPv6Header(dstIP net.IP) *layers.IPv6 {
 func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF) *layers.TCP {
 	tcp := h.tcpPool.Get().(*layers.TCP)
 	// Window: randomize between 64240–65535 to avoid static fingerprint
-	window := uint16(64240 + cryptoRandUint32()%1296)
+	window := uint16(64240 + fastRandUint32()%1296)
 	*tcp = layers.TCP{
 		SrcPort: layers.TCPPort(h.srcPort),
 		DstPort: layers.TCPPort(dstPort),
@@ -177,28 +183,28 @@ func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF) *layers.TCP {
 
 	counter := atomic.AddUint32(&h.tsCounter, 1)
 	// Timestamp: base + counter-derived value + random jitter (0–7ms)
-	jitter := cryptoRandUint32() % 8
+	jitter := fastRandUint32() % 8
 	tsVal := h.baseTime + (counter >> 3) + jitter
 	if f.SYN {
 		binary.BigEndian.PutUint32(h.synOptions[2].OptionData[0:4], tsVal)
 		binary.BigEndian.PutUint32(h.synOptions[2].OptionData[4:8], 0)
 		tcp.Options = h.synOptions
 		// Seq: seed-based + counter with jitter
-		tcp.Seq = h.seqSeed + counter*1461 + cryptoRandUint32()%64
+		tcp.Seq = h.seqSeed + counter*1461 + fastRandUint32()%64
 		tcp.Ack = 0
 		if f.ACK {
 			tcp.Ack = tcp.Seq + 1
 		}
 	} else {
-		tsEcr := tsVal - (counter%200 + 50) - cryptoRandUint32()%10
+		tsEcr := tsVal - (counter%200 + 50) - fastRandUint32()%10
 		binary.BigEndian.PutUint32(h.ackOptions[2].OptionData[0:4], tsVal)
 		binary.BigEndian.PutUint32(h.ackOptions[2].OptionData[4:8], tsEcr)
 		tcp.Options = h.ackOptions
 		// Seq/Ack: seed-based with realistic-looking increments and jitter
-		dataLen := cryptoRandUint32()%1400 + 100
-		seq := h.seqSeed + counter*1461 + cryptoRandUint32()%64
+		dataLen := fastRandUint32()%1400 + 100
+		seq := h.seqSeed + counter*1461 + fastRandUint32()%64
 		tcp.Seq = seq
-		tcp.Ack = seq - dataLen + cryptoRandUint32()%32
+		tcp.Ack = seq - dataLen + fastRandUint32()%32
 	}
 
 	return tcp

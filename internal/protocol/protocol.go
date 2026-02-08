@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"paqet/internal/conf"
-	"paqet/internal/flog"
 	"paqet/internal/tnet"
 )
 
@@ -30,7 +29,6 @@ func (p *Proto) Read(r io.Reader) error {
 	if err := binary.Read(r, binary.BigEndian, &p.Type); err != nil {
 		return err
 	}
-	flog.Debugf("proto: read type=0x%02x", p.Type)
 
 	switch p.Type {
 	case PPING, PPONG:
@@ -57,13 +55,7 @@ func (p *Proto) Read(r io.Reader) error {
 		// Read address
 		addr, err := readAddr(r)
 		if err != nil {
-			flog.Debugf("proto: readAddr failed: %v", err)
 			return err
-		}
-		if addr == nil {
-			flog.Debugf("proto: readAddr returned nil (hostLen was 0)")
-		} else {
-			flog.Debugf("proto: readAddr OK host=%q port=%d", addr.Host, addr.Port)
 		}
 		p.Addr = addr
 		return nil

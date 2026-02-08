@@ -41,7 +41,7 @@ func smuxConf(cfg *conf.KCP) *smux.Config {
 	sconf.Version = 2
 	sconf.KeepAliveInterval = 10 * time.Second
 	sconf.KeepAliveTimeout = 30 * time.Second
-	sconf.MaxFrameSize = 65535
+	sconf.MaxFrameSize = 16384
 	sconf.MaxReceiveBuffer = cfg.Smuxbuf
 	sconf.MaxStreamBuffer = cfg.Streambuf
 	return sconf
