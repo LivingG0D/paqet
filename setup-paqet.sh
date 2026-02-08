@@ -97,7 +97,7 @@ if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN
 
             # --- Step 5: Apply standard optimization patches ---
             sed -i 's/conn: .*/conn: 8/' "$INSTALL_DIR/config.yaml"
-            sed -i 's/block: .*/block: "xor"/' "$INSTALL_DIR/config.yaml"
+            sed -i 's/block: .*/block: "salsa20"/' "$INSTALL_DIR/config.yaml"
             sed -i 's/mtu: .*/mtu: 1200/' "$INSTALL_DIR/config.yaml"
             sed -i 's/sockbuf: .*/sockbuf: 16777216/' "$INSTALL_DIR/config.yaml"
             # Disable FEC: remove old dshard/pshard and add dshard=0/pshard=0
@@ -309,7 +309,8 @@ echo -e "\n${BLUE}Encryption${NC}"
 echo "Choose encryption for KCP packets (MUST match on both sides):"
 echo ""
 echo "  ${GREEN}Recommended:${NC}"
-echo "    xor       - XOR cipher. Very fast, low CPU. Obfuscates headers for DPI bypass. (DEFAULT)"
+echo "    salsa20   - Salsa20 stream cipher. Fast, no block padding. Best DPI bypass. (DEFAULT)"
+echo "    xor       - XOR cipher. Very fast, low CPU. Basic header obfuscation."
 echo "    none      - No encryption. Zero CPU cost. Use when V2Ray/tunnel already encrypts."
 echo ""
 echo "  ${BLUE}Standard:${NC}"
@@ -328,8 +329,8 @@ echo "    3des      - Triple DES. Legacy, slow. Not recommended."
 echo "    tea/xtea  - Tiny Encryption Algorithm. Simple, compact."
 echo "    null      - Truly null (no processing at all). Debug only."
 echo ""
-read -r -p "Encryption [xor/none/aes/salsa20/...] (default xor): " KCP_BLOCK < /dev/tty
-KCP_BLOCK=${KCP_BLOCK:-"xor"}
+read -r -p "Encryption [salsa20/xor/none/aes/...] (default salsa20): " KCP_BLOCK < /dev/tty
+KCP_BLOCK=${KCP_BLOCK:-"salsa20"}
 
 # FEC Selection
 echo -e "\n${BLUE}Forward Error Correction (FEC)${NC}"

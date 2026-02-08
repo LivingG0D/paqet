@@ -59,7 +59,7 @@ func (k *KCP) setDefaults(role string) {
 	// Users can enable FEC by setting dshard/pshard in config (e.g. dshard: 10, pshard: 1).
 
 	if k.Block_ == "" {
-		k.Block_ = "xor" // XOR is required for DPI bypass — obfuscates KCP headers
+		k.Block_ = "salsa20" // Stream cipher — best DPI bypass, no block padding artifacts
 	}
 
 	if k.Smuxbuf == 0 {
