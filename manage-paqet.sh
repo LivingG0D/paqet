@@ -24,6 +24,11 @@ show_header() {
     clear
     echo -e "${BLUE}=== Paqet Control Panel ===${NC}"
     systemctl is-active --quiet $SERVICE_NAME && echo -e "Status: ${GREEN}Running${NC}" || echo -e "Status: ${RED}Stopped${NC}"
+    # Show installed version
+    if [ -x "/opt/paqet/paqet" ]; then
+        INSTALLED_VER=$(/opt/paqet/paqet version 2>/dev/null | grep -oP 'Version:\s+\K\S+' || echo "unknown")
+        echo -e "Version: ${CYAN}${INSTALLED_VER}${NC}"
+    fi
     echo "---------------------------"
 }
 
