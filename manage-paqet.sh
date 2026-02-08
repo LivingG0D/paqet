@@ -29,9 +29,86 @@ show_header() {
 
 view_logs() {
     echo -e "${BLUE}Showing last 50 log lines (Ctrl+C to exit)...${NC}"
-    # Use grep to colorize basic keywords if journalctl doesn't support it well on minimal systems
     journalctl -u $SERVICE_NAME -n 50 -f | \
         grep --line-buffered -E --color=auto 'ERROR|WARN|INFO|DEBUG|panic|$' 
+}
+
+view_stats() {
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+    echo -e "${CYAN}       📊 Live Performance Stats       ${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+    echo -e "${BLUE}Showing only [STATS] lines (Ctrl+C to exit)...${NC}\n"
+    journalctl -u $SERVICE_NAME -n 200 -f | \
+        grep --line-buffered '\[STATS\]'
+}
+
+view_alerts() {
+    echo -e "${RED}═══════════════════════════════════════${NC}"
+    echo -e "${RED}       ⚠️  Bottleneck Alerts            ${NC}"
+    echo -e "${RED}═══════════════════════════════════════${NC}"
+    
+    # Show recent alerts (last 500 lines)
+    RECENT_ALERTS=$(journalctl -u $SERVICE_NAME -n 500 --no-pager 2>/dev/null | grep '\[ALERT\]')
+    
+    if [ -z "$RECENT_ALERTS" ]; then
+        echo -e "\n${GREEN}✓ No bottleneck alerts in recent logs. System healthy.${NC}"
+    else
+        ALERT_COUNT=$(echo "$RECENT_ALERTS" | wc -l)
+        echo -e "\n${YELLOW}Found $ALERT_COUNT alert(s) in recent logs:${NC}\n"
+        echo "$RECENT_ALERTS" | tail -20
+        
+        # Summary by type
+        echo -e "\n${YELLOW}── Alert Summary ──${NC}"
+        echo "$RECENT_ALERTS" | grep -oP 'BOTTLENECK: \K[a-z_]+' | sort | uniq -c | sort -rn | while read COUNT TYPE; do
+            case $TYPE in
+                packet_loss)        ICON="📡" ;;
+                pcap_drops)         ICON="💧" ;;
+                send_saturated)     ICON="📤" ;;
+                recv_saturated)     ICON="📥" ;;
+                read_errors)        ICON="❌" ;;
+                throughput_collapse) ICON="🐌" ;;
+                stream_overload)    ICON="🔥" ;;
+                goroutine_leak)     ICON="🧵" ;;
+                *)                  ICON="⚠️"  ;;
+            esac
+            echo -e "  $ICON $TYPE: ${RED}${COUNT}x${NC}"
+        done
+    fi
+    
+    echo -e "\n${BLUE}Press Enter to return, or 'f' to follow live alerts...${NC}"
+    read -r -p "" CHOICE < /dev/tty
+    if [[ "$CHOICE" =~ ^[Ff]$ ]]; then
+        echo -e "${RED}Following live alerts (Ctrl+C to exit)...${NC}\n"
+        journalctl -u $SERVICE_NAME -n 200 -f | \
+            grep --line-buffered '\[ALERT\]'
+    fi
+}
+
+view_diagnostics() {
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+    echo -e "${CYAN}       🔍 Diagnostics Snapshot          ${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════${NC}\n"
+    
+    # Latest stats
+    echo -e "${YELLOW}── Latest Stats ──${NC}"
+    journalctl -u $SERVICE_NAME -n 200 --no-pager 2>/dev/null | grep '\[STATS\]' | tail -4
+    
+    # Latest alerts
+    echo -e "\n${YELLOW}── Recent Alerts ──${NC}"
+    ALERTS=$(journalctl -u $SERVICE_NAME -n 200 --no-pager 2>/dev/null | grep '\[ALERT\]' | tail -5)
+    if [ -z "$ALERTS" ]; then
+        echo -e "${GREEN}✓ No alerts${NC}"
+    else
+        echo "$ALERTS"
+    fi
+    
+    # Service status
+    echo -e "\n${YELLOW}── Service ──${NC}"
+    systemctl is-active --quiet $SERVICE_NAME && echo -e "Status: ${GREEN}Running${NC}" || echo -e "Status: ${RED}Stopped${NC}"
+    UPTIME=$(systemctl show $SERVICE_NAME --property=ActiveEnterTimestamp --value 2>/dev/null)
+    [ -n "$UPTIME" ] && echo "Since: $UPTIME"
+    
+    read -r -p "\nPress Enter to continue..." DUMMY < /dev/tty
 }
 
 edit_ports() {
@@ -180,26 +257,32 @@ update_system() {
 main_menu() {
     while true; do
         show_header
-        echo "1) View Logs"
-        echo "2) Edit Configuration (Ports/Rules)"
-        echo "3) Tune Performance (Mode/MTU)"
-        echo "4) Restart Service"
-        echo "5) Stop Service"
-        echo "6) Update System"
-        echo "7) Apply System Optimization"
-        echo "8) Exit"
+        echo "1) View Logs (all)"
+        echo "2) 📊 View Stats (live performance)"
+        echo "3) ⚠️  View Alerts (bottleneck detection)"
+        echo "4) 🔍 Diagnostics Snapshot"
+        echo "5) Edit Configuration (Ports/Rules)"
+        echo "6) Tune Performance (Mode/MTU)"
+        echo "7) Restart Service"
+        echo "8) Stop Service"
+        echo "9) Update System"
+        echo "10) Apply System Optimization"
+        echo "0) Exit"
         
         read -r -p "Select option: " OPT < /dev/tty
         
         case $OPT in
             1) view_logs ;;
-            2) edit_ports ;;
-            3) tune_performance ;;
-            4) systemctl restart $SERVICE_NAME; echo "Restarted."; sleep 1 ;;
-            5) systemctl stop $SERVICE_NAME; echo "Stopped."; sleep 1 ;;
-            6) update_system ;;
-            7) apply_sysctl ;;
-            8) exit 0 ;;
+            2) view_stats ;;
+            3) view_alerts ;;
+            4) view_diagnostics ;;
+            5) edit_ports ;;
+            6) tune_performance ;;
+            7) systemctl restart $SERVICE_NAME; echo "Restarted."; sleep 1 ;;
+            8) systemctl stop $SERVICE_NAME; echo "Stopped."; sleep 1 ;;
+            9) update_system ;;
+            10) apply_sysctl ;;
+            0) exit 0 ;;
             *) echo "Invalid option" ;;
         esac
     done
