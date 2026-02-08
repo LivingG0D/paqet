@@ -10,17 +10,21 @@ import (
 )
 
 type Client struct {
-	cfg     *conf.Conf
-	iter    *iterator.Iterator[*timedConn]
-	udpPool *udpPool
-	mu      sync.Mutex
+	cfg      *conf.Conf
+	iter     *iterator.Iterator[*timedConn]
+	udpPool  *udpPool
+	mu       sync.Mutex
+	minConns int
+	maxConns int
 }
 
 func New(cfg *conf.Conf) (*Client, error) {
 	c := &Client{
-		cfg:     cfg,
-		iter:    &iterator.Iterator[*timedConn]{},
-		udpPool: &udpPool{strms: make(map[uint64]tnet.Strm)},
+		cfg:      cfg,
+		iter:     &iterator.Iterator[*timedConn]{},
+		udpPool:  &udpPool{strms: make(map[uint64]tnet.Strm)},
+		minConns: cfg.Transport.Conn,
+		maxConns: cfg.Transport.Conn * 2,
 	}
 	return c, nil
 }

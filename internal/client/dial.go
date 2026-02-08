@@ -10,21 +10,40 @@ import (
 func (c *Client) newConn() (tnet.Conn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Find the least-loaded connection (fewest active streams)
+	var bestTC *timedConn
+	bestStreams := int(^uint(0) >> 1) // max int
+	for _, tc := range c.iter.Items {
+		if tc.conn == nil {
+			continue
+		}
+		n := tc.conn.NumStreams()
+		if n < bestStreams {
+			bestStreams = n
+			bestTC = tc
+		}
+	}
+
+	if bestTC == nil {
+		// Fallback to round-robin
+		bestTC = c.iter.Next()
+	}
+
 	autoExpire := 300
-	tc := c.iter.Next()
-	go tc.sendTCPF(tc.conn)
-	err := tc.conn.Ping(false)
+	go bestTC.sendTCPF(bestTC.conn)
+	err := bestTC.conn.Ping(false)
 	if err != nil {
 		flog.Infof("connection lost, retrying....")
-		if tc.conn != nil {
-			tc.conn.Close()
+		if bestTC.conn != nil {
+			bestTC.conn.Close()
 		}
-		if c, err := tc.createConn(); err == nil {
-			tc.conn = c
+		if conn, err := bestTC.createConn(); err == nil {
+			bestTC.conn = conn
 		}
-		tc.expire = time.Now().Add(time.Duration(autoExpire) * time.Second)
+		bestTC.expire = time.Now().Add(time.Duration(autoExpire) * time.Second)
 	}
-	return tc.conn, nil
+	return bestTC.conn, nil
 }
 
 func (c *Client) newStrm() (tnet.Strm, error) {

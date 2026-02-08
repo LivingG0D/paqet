@@ -8,6 +8,7 @@ import (
 type Conn interface {
 	OpenStrm() (Strm, error)
 	AcceptStrm() (Strm, error)
+	NumStreams() int
 	Ping(wait bool) error
 	Close() error
 	LocalAddr() net.Addr
