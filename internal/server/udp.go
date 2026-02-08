@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"paqet/internal/flog"
 	"paqet/internal/pkg/buffer"
@@ -10,6 +11,9 @@ import (
 )
 
 func (s *Server) handleUDPProtocol(ctx context.Context, strm tnet.Strm, p *protocol.Proto) error {
+	if p.Addr == nil {
+		return fmt.Errorf("UDP stream %d: missing destination address", strm.SID())
+	}
 	flog.Infof("accepted UDP stream %d: %s -> %s", strm.SID(), strm.RemoteAddr(), p.Addr.String())
 	return s.handleUDP(ctx, strm, p.Addr.String())
 }
