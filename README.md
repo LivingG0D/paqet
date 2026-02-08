@@ -1,4 +1,4 @@
-# paqet
+# paqet (under development, use at your own risk)
 
 A bidirectional packet-level proxy that tunnels KCP over raw TCP packets with encryption. Built for environments where standard VPN protocols are blocked or throttled.
 
