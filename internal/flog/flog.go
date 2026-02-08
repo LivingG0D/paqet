@@ -19,7 +19,7 @@ const (
 
 var (
 	minLevel = Info
-	logCh    = make(chan string, 1024)
+	logCh    = make(chan string, 4096)
 )
 
 func init() {

@@ -7,6 +7,7 @@ import (
 	"paqet/internal/pkg/iterator"
 	"paqet/internal/tnet"
 	"sync"
+	"time"
 )
 
 type Client struct {
@@ -41,8 +42,26 @@ func (c *Client) Start(ctx context.Context) error {
 	}
 	go c.ticker(ctx)
 
+	stats := flog.NewStatsReporter(30 * time.Second)
+	stats.SetConnFunc(func() []flog.ConnStats {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		result := make([]flog.ConnStats, 0, len(c.iter.Items))
+		for _, tc := range c.iter.Items {
+			if tc.conn != nil {
+				result = append(result, flog.ConnStats{
+					Remote:  tc.conn.RemoteAddr().String(),
+					Streams: tc.conn.NumStreams(),
+				})
+			}
+		}
+		return result
+	})
+	stats.Start()
+
 	go func() {
 		<-ctx.Done()
+		stats.Stop()
 		for _, tc := range c.iter.Items {
 			tc.close()
 		}

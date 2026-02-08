@@ -13,6 +13,7 @@ import (
 	"paqet/internal/socket"
 	"paqet/internal/tnet"
 	"paqet/internal/tnet/kcp"
+	"time"
 )
 
 type Server struct {
@@ -52,6 +53,10 @@ func (s *Server) Start() error {
 	}
 	defer listener.Close()
 	flog.Infof("Server started - listening for packets on :%d", s.cfg.Listen.Addr.Port)
+
+	stats := flog.NewStatsReporter(30 * time.Second)
+	stats.Start()
+	defer stats.Stop()
 
 	s.wg.Go(func() {
 		s.listen(ctx, listener)
