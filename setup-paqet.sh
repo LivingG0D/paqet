@@ -101,11 +101,8 @@ if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN
             sed -i 's/block: .*/block: "xor"/' "$INSTALL_DIR/config.yaml"
             sed -i 's/mtu: .*/mtu: 1200/' "$INSTALL_DIR/config.yaml"
             sed -i 's/sockbuf: .*/sockbuf: 16777216/' "$INSTALL_DIR/config.yaml"
-            # Remove FEC settings (dshard/pshard) — disabled by default now
-            sed -i '/^\s*dshard:/d' "$INSTALL_DIR/config.yaml"
-            sed -i '/^\s*pshard:/d' "$INSTALL_DIR/config.yaml"
             
-            echo -e "${GREEN}Configuration migrated and optimized (fast mode, 4 conns, XOR obfuscation, FEC off, 16MB buffer).${NC}"
+            echo -e "${GREEN}Configuration migrated and optimized (fast mode, 4 conns, XOR, 16MB buffer).${NC}"
         fi
     else
         echo -e "${BLUE}Stopping and removing existing service...${NC}"
