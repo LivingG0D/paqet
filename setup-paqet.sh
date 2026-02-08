@@ -98,11 +98,14 @@ if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN
             # --- Step 5: Apply standard optimization patches ---
             sed -i 's/mode: .*/mode: "fast"/' "$INSTALL_DIR/config.yaml"
             sed -i 's/conn: .*/conn: 4/' "$INSTALL_DIR/config.yaml"
-            sed -i 's/block: .*/block: "xor"/' "$INSTALL_DIR/config.yaml"
+            sed -i 's/block: .*/block: "none"/' "$INSTALL_DIR/config.yaml"
             sed -i 's/mtu: .*/mtu: 1200/' "$INSTALL_DIR/config.yaml"
             sed -i 's/sockbuf: .*/sockbuf: 16777216/' "$INSTALL_DIR/config.yaml"
+            # Remove FEC settings (dshard/pshard) — disabled by default now
+            sed -i '/^\s*dshard:/d' "$INSTALL_DIR/config.yaml"
+            sed -i '/^\s*pshard:/d' "$INSTALL_DIR/config.yaml"
             
-            echo -e "${GREEN}Configuration migrated and optimized (fast mode, 4 conns, XOR, 16MB buffer).${NC}"
+            echo -e "${GREEN}Configuration migrated and optimized (fast mode, 4 conns, no encryption, FEC off, 16MB buffer).${NC}"
         fi
     else
         echo -e "${BLUE}Stopping and removing existing service...${NC}"
@@ -327,7 +330,7 @@ transport:
     mode: "$KCP_MODE"
     mtu: $KCP_MTU
     key: "$CFG_KEY"
-    block: "xor"
+    block: "none"
 EOF
 
     echo -e "${GREEN}Config created at $CONFIG_FILE${NC}"
@@ -402,7 +405,7 @@ transport:
     mode: "$KCP_MODE"
     mtu: $KCP_MTU
     key: "$CFG_KEY"
-    block: "xor"
+    block: "none"
 EOF
 
     if [ "$CLIENT_MODE" == "1" ]; then

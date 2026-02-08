@@ -193,8 +193,8 @@ func (s *StatsReporter) report() {
 		)
 	}
 
-	// Bottleneck: goroutine leak (>20% growth between intervals)
-	if s.prevGoroutines > 0 && goroutines > 100 {
+	// Bottleneck: goroutine leak (>20% growth between intervals, skip warmup)
+	if tick > 3 && s.prevGoroutines > 0 && goroutines > 100 {
 		growth := float64(goroutines-s.prevGoroutines) / float64(s.prevGoroutines) * 100
 		if growth > 20 {
 			logf(Warn, "[ALERT] BOTTLENECK: goroutine_leak — %d → %d (+%.0f%%). Goroutines growing fast, possible leak", s.prevGoroutines, goroutines, growth)

@@ -54,13 +54,13 @@ func (k *KCP) setDefaults(role string) {
 		}
 	}
 
-	if k.Dshard == 0 && k.Pshard == 0 {
-		k.Dshard = 10
-		k.Pshard = 1
-	}
+	// FEC defaults: dshard=0, pshard=0 (disabled)
+	// FEC adds bandwidth overhead and doesn't help with bursty pcap drops.
+	// Users can explicitly set dshard/pshard in config to enable it.
+	// When both are 0, kcp-go natively disables FEC.
 
 	if k.Block_ == "" {
-		k.Block_ = "xor"
+		k.Block_ = "none"
 	}
 
 	if k.Smuxbuf == 0 {
