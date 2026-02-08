@@ -142,9 +142,9 @@ func (s *StatsReporter) report() {
 		logf(Warn, "[ALERT] BOTTLENECK: packet_loss — %.1f%% retransmission (>5%%). Causes: pcap buffer overflow, network congestion, ISP throttling", retransRate)
 	}
 
-	// Bottleneck: pcap drops
+	// Bottleneck: KCP lost segments (retransmission timeouts)
 	if lost > 100 {
-		logf(Warn, "[ALERT] BOTTLENECK: pcap_drops — %d lost segments (>100). pcap buffer can't keep up. Try: increase sockbuf, reduce conn count", lost)
+		logf(Warn, "[ALERT] BOTTLENECK: kcp_lost — %d lost segments (>100). KCP retransmit timeouts. Causes: network congestion, ISP throttling, high stream count", lost)
 	}
 
 	// Bottleneck: send buffer saturated

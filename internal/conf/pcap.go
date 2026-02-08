@@ -14,7 +14,11 @@ type PCAP struct {
 
 func (p *PCAP) setDefaults(role string) {
 	if p.Sockbuf == 0 {
-		p.Sockbuf = 16 * 1024 * 1024 // 16MB for both server and client
+		if role == "server" {
+			p.Sockbuf = 32 * 1024 * 1024 // 32MB: servers handle many concurrent streams
+		} else {
+			p.Sockbuf = 16 * 1024 * 1024 // 16MB: clients typically fewer streams
+		}
 	}
 	// Promisc defaults to false (zero value) — saves CPU
 	if p.SnapLen == 0 {
