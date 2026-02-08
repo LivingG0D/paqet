@@ -151,37 +151,51 @@ func decodeTCPF(flags uint16) conf.TCPF {
 }
 
 // writeAddr serializes a tnet.Addr to binary.
+// Format: [1 byte present][1 byte hostLen][host bytes][2 byte port]
 func writeAddr(w io.Writer, addr *tnet.Addr) error {
 	if addr == nil {
-		return binary.Write(w, binary.BigEndian, uint8(0))
+		return binary.Write(w, binary.BigEndian, uint8(0)) // not present
+	}
+	if err := binary.Write(w, binary.BigEndian, uint8(1)); err != nil { // present
+		return err
 	}
 	hostBytes := []byte(addr.Host)
 	hostLen := uint8(len(hostBytes))
 	if err := binary.Write(w, binary.BigEndian, hostLen); err != nil {
 		return err
 	}
-	if _, err := w.Write(hostBytes); err != nil {
-		return err
+	if hostLen > 0 {
+		if _, err := w.Write(hostBytes); err != nil {
+			return err
+		}
 	}
 	return binary.Write(w, binary.BigEndian, uint16(addr.Port))
 }
 
 // readAddr deserializes a tnet.Addr from binary.
 func readAddr(r io.Reader) (*tnet.Addr, error) {
+	var present uint8
+	if err := binary.Read(r, binary.BigEndian, &present); err != nil {
+		return nil, err
+	}
+	if present == 0 {
+		return nil, nil
+	}
 	var hostLen uint8
 	if err := binary.Read(r, binary.BigEndian, &hostLen); err != nil {
 		return nil, err
 	}
-	if hostLen == 0 {
-		return nil, nil
-	}
-	hostBytes := make([]byte, hostLen)
-	if _, err := io.ReadFull(r, hostBytes); err != nil {
-		return nil, err
+	var host string
+	if hostLen > 0 {
+		hostBytes := make([]byte, hostLen)
+		if _, err := io.ReadFull(r, hostBytes); err != nil {
+			return nil, err
+		}
+		host = string(hostBytes)
 	}
 	var port uint16
 	if err := binary.Read(r, binary.BigEndian, &port); err != nil {
 		return nil, err
 	}
-	return &tnet.Addr{Host: string(hostBytes), Port: int(port)}, nil
+	return &tnet.Addr{Host: host, Port: int(port)}, nil
 }
