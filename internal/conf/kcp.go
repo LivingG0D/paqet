@@ -33,7 +33,7 @@ type KCP struct {
 
 func (k *KCP) setDefaults(role string) {
 	if k.Mode == "" {
-		k.Mode = "fast3"
+		k.Mode = "fast"
 	}
 	if k.MTU == 0 {
 		k.MTU = 1350
