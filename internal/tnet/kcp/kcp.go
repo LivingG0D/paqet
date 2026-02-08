@@ -34,14 +34,6 @@ func aplConf(conn *kcp.UDPSession, cfg *conf.KCP) {
 	conn.SetMtu(cfg.MTU)
 	conn.SetWriteDelay(wDelay)
 	conn.SetACKNoDelay(ackNoDelay)
-
-	// Stream buffer: coalesce small writes into larger KCP packets
-	// Critical for relay throughput with many concurrent streams
-	conn.SetStreamMode(true)
-
-	// OS-level socket buffers: prevent drops under load
-	conn.SetReadBuffer(4 * 1024 * 1024)
-	conn.SetWriteBuffer(4 * 1024 * 1024)
 }
 
 func smuxConf(cfg *conf.KCP) *smux.Config {
