@@ -60,7 +60,7 @@ func (k *KCP) setDefaults(role string) {
 	// When both are 0, kcp-go natively disables FEC.
 
 	if k.Block_ == "" {
-		k.Block_ = "none"
+		k.Block_ = "xor" // XOR is required for DPI bypass — obfuscates KCP headers
 	}
 
 	if k.Smuxbuf == 0 {
