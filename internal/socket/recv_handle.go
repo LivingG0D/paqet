@@ -60,27 +60,35 @@ func (h *RecvHandle) Read() ([]byte, net.Addr, error) {
 		return nil, nil, err
 	}
 
-	addr := &net.UDPAddr{}
 	h.decoded = h.decoded[:0]
-
 	if err := h.parser.DecodeLayers(data, &h.decoded); err != nil {
 		// Partial decode is ok — we may still have the layers we need
 	}
 
+	addr := &net.UDPAddr{}
+	var haveIP, haveTCP bool
 	for _, lt := range h.decoded {
 		switch lt {
 		case layers.LayerTypeIPv4:
 			addr.IP = h.ip4.SrcIP
+			haveIP = true
 		case layers.LayerTypeIPv6:
 			addr.IP = h.ip6.SrcIP
+			haveIP = true
 		case layers.LayerTypeTCP:
 			addr.Port = int(h.tcp.SrcPort)
+			haveTCP = true
 		}
+	}
+
+	// Missing network/transport layers — return nil addr (upstream #71)
+	if !haveIP || !haveTCP {
+		return nil, nil, nil
 	}
 
 	payload := h.tcp.LayerPayload()
 	if len(payload) == 0 {
-		return nil, addr, nil
+		return nil, nil, nil
 	}
 	return payload, addr, nil
 }

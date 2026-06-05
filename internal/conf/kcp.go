@@ -3,6 +3,7 @@ package conf
 import (
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/xtaci/kcp-go/v5"
 )
@@ -28,7 +29,12 @@ type KCP struct {
 	Smuxbuf   int `yaml:"smuxbuf"`
 	Streambuf int `yaml:"streambuf"`
 
-	Block kcp.BlockCrypt `yaml:"-"`
+	Smuxkalive_   int `yaml:"smuxkalive"`
+	Smuxktimeout_ int `yaml:"smuxktimeout"`
+
+	Smuxkalive   time.Duration  `yaml:"-"`
+	Smuxktimeout time.Duration  `yaml:"-"`
+	Block        kcp.BlockCrypt `yaml:"-"`
 }
 
 func (k *KCP) setDefaults(role string) {
@@ -67,6 +73,13 @@ func (k *KCP) setDefaults(role string) {
 	}
 	if k.Streambuf == 0 {
 		k.Streambuf = 64 * 1024 // 64KB per stream: small to limit per-stream pressure
+	}
+
+	if k.Smuxkalive_ == 0 {
+		k.Smuxkalive_ = 30 // tuned: longer keepalive interval = less overhead/stealthier under high concurrency
+	}
+	if k.Smuxktimeout_ == 0 {
+		k.Smuxktimeout_ = 90
 	}
 }
 
@@ -108,6 +121,9 @@ func (k *KCP) validate() []error {
 	if k.Streambuf < 1024 {
 		errors = append(errors, fmt.Errorf("KCP streambuf must be >= 1024 bytes"))
 	}
+
+	k.Smuxkalive = time.Duration(k.Smuxkalive_) * time.Second
+	k.Smuxktimeout = time.Duration(k.Smuxktimeout_) * time.Second
 
 	return errors
 }

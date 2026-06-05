@@ -2,7 +2,6 @@ package kcp
 
 import (
 	"paqet/internal/conf"
-	"time"
 
 	"github.com/xtaci/kcp-go/v5"
 	"github.com/xtaci/smux"
@@ -39,8 +38,10 @@ func aplConf(conn *kcp.UDPSession, cfg *conf.KCP) {
 func smuxConf(cfg *conf.KCP) *smux.Config {
 	var sconf = smux.DefaultConfig()
 	sconf.Version = 2
-	sconf.KeepAliveInterval = 30 * time.Second
-	sconf.KeepAliveTimeout = 90 * time.Second
+	// Keepalive is configurable (upstream #111); defaults tuned to 30s/90s in conf.setDefaults.
+	sconf.KeepAliveInterval = cfg.Smuxkalive
+	sconf.KeepAliveTimeout = cfg.Smuxktimeout
+	// 16384: conservative frame size to limit per-stream memory under high concurrency.
 	sconf.MaxFrameSize = 16384
 	sconf.MaxReceiveBuffer = cfg.Smuxbuf
 	sconf.MaxStreamBuffer = cfg.Streambuf
