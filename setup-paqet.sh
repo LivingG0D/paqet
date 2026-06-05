@@ -106,7 +106,7 @@ if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN
             # --- Step 5: Apply standard optimization patches ---
             sed -i 's/conn: .*/conn: 8/' "$INSTALL_DIR/config.yaml"
             sed -i 's/block: .*/block: "salsa20"/' "$INSTALL_DIR/config.yaml"
-            sed -i 's/mtu: .*/mtu: 1200/' "$INSTALL_DIR/config.yaml"
+            sed -i 's/mtu: .*/mtu: 1250/' "$INSTALL_DIR/config.yaml"
             sed -i 's/sockbuf: .*/sockbuf: 16777216/' "$INSTALL_DIR/config.yaml"
             # Disable FEC: remove old dshard/pshard and add dshard=0/pshard=0
             sed -i '/^\s*dshard:/d' "$INSTALL_DIR/config.yaml"
@@ -114,7 +114,7 @@ if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN
             sed -i '/block:/a\    dshard: 0\n    pshard: 0' "$INSTALL_DIR/config.yaml"
 
             chmod 600 "$INSTALL_DIR/config.yaml" "$INSTALL_DIR/config.yaml.bak" 2>/dev/null || true
-            echo -e "${GREEN}Configuration migrated (8 conns, salsa20, MTU 1200, FEC off, 16MB buffer).${NC}"
+            echo -e "${GREEN}Configuration migrated (8 conns, salsa20, MTU 1250, FEC off, 16MB buffer).${NC}"
         fi
     else
         echo -e "${BLUE}Stopping and removing existing service...${NC}"
@@ -323,12 +323,12 @@ else
 
     # Performance Tuning
     echo -e "\n${BLUE}Performance Tuning${NC}"
-    echo "KCP Mode determines aggressiveness. 'fast' is standard, 'normal' is better for unstable/lossy networks."
-    read -r -p "KCP Mode [fast/normal/fast2/fast3/manual] (default fast): " KCP_MODE < /dev/tty
-    KCP_MODE=${KCP_MODE:-"fast"}
+    echo "KCP Mode determines aggressiveness. 'normal' is better for unstable/lossy networks; 'fast' is more aggressive."
+    read -r -p "KCP Mode [normal/fast/fast2/fast3/manual] (default normal): " KCP_MODE < /dev/tty
+    KCP_MODE=${KCP_MODE:-"normal"}
 
-    read -r -p "MTU Size (default 1200, try 1200 if unstable): " KCP_MTU < /dev/tty
-    KCP_MTU=${KCP_MTU:-1200}
+    read -r -p "MTU Size (default 1250, lower if unstable): " KCP_MTU < /dev/tty
+    KCP_MTU=${KCP_MTU:-1250}
 
     # Encryption Selection
     echo -e "\n${BLUE}Encryption${NC}"
