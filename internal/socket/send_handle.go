@@ -1,7 +1,6 @@
 package socket
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	randv2 "math/rand/v2"
@@ -33,8 +32,6 @@ type SendHandle struct {
 	srcIPv6RHWA net.HardwareAddr
 	srcPort     uint16
 	dscp        uint8
-	synOptions  []layers.TCPOption
-	ackOptions  []layers.TCPOption
 	baseTime    uint32
 	tsCounter   uint32
 	seqSeed     uint32
@@ -44,18 +41,48 @@ type SendHandle struct {
 	ipv6Pool    sync.Pool
 	tcpPool     sync.Pool
 	bufPool     sync.Pool
+	optsPool    sync.Pool // *tcpOpts; per-packet TCP option slices (see tcpOpts)
 }
 
-// fastRand is a per-SendHandle PRNG seeded from crypto/rand.
-// Avoids kernel syscalls on every packet while maintaining unpredictability.
-var fastRand = func() *randv2.Rand {
-	var seed [32]byte
-	rand.Read(seed[:])
-	return randv2.New(randv2.NewChaCha8(seed))
-}()
+// tcpOpts holds the TCP option slices for a single in-flight packet. Each
+// packet borrows its own holder from SendHandle.optsPool so that concurrent
+// senders never share the timestamp backing array that buildTCPHeader rewrites
+// per packet. syn and ack are prebuilt once per holder; only ts changes.
+type tcpOpts struct {
+	syn []layers.TCPOption
+	ack []layers.TCPOption
+	ts  [8]byte // backs OptionData of the Timestamps option in syn[2]/ack[2]
+}
 
+// newTCPOpts builds an option holder. mss is the per-handle randomized MSS
+// bytes — read-only and safely shared across all holders. ts is private per
+// holder so a packet's timestamp write is never observed by another goroutine.
+func newTCPOpts(mss []byte) *tcpOpts {
+	o := &tcpOpts{}
+	o.syn = []layers.TCPOption{
+		{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: mss},
+		{OptionType: layers.TCPOptionKindSACKPermitted, OptionLength: 2},
+		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: o.ts[:]},
+		{OptionType: layers.TCPOptionKindNop},
+		{OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{8}},
+	}
+	o.ack = []layers.TCPOption{
+		{OptionType: layers.TCPOptionKindNop},
+		{OptionType: layers.TCPOptionKindNop},
+		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: o.ts[:]},
+	}
+	return o
+}
+
+// fastRandUint32 returns an unpredictable uint32 for per-packet fingerprint
+// jitter (TTL/window/timestamp/seq). It uses math/rand/v2's top-level
+// generator, which is safe for concurrent use (per-thread runtime state, no
+// syscall, no lock). This matters because buildTCPHeader runs concurrently
+// across many KCP/smux streams: a shared *rand.Rand — as previously used here —
+// is explicitly NOT safe for concurrent use (see math/rand/v2 docs) and races
+// on the send path under `go test -race`.
 func fastRandUint32() uint32 {
-	return fastRand.Uint32()
+	return randv2.Uint32()
 }
 
 func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
@@ -75,29 +102,13 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 	mssVal := 1360 + int(fastRandUint32()%101)
 	mssBytes := []byte{byte(mssVal >> 8), byte(mssVal & 0xFF)}
 
-	synOptions := []layers.TCPOption{
-		{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: mssBytes},
-		{OptionType: layers.TCPOptionKindSACKPermitted, OptionLength: 2},
-		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: make([]byte, 8)},
-		{OptionType: layers.TCPOptionKindNop},
-		{OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{8}},
-	}
-
-	ackOptions := []layers.TCPOption{
-		{OptionType: layers.TCPOptionKindNop},
-		{OptionType: layers.TCPOptionKindNop},
-		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: make([]byte, 8)},
-	}
-
 	sh := &SendHandle{
-		handle:     handle,
-		srcPort:    uint16(cfg.Port),
-		dscp:       uint8(cfg.PCAP.DSCP),
-		synOptions: synOptions,
-		ackOptions: ackOptions,
-		baseTime:   uint32(time.Now().UnixNano() / int64(time.Millisecond)),
-		seqSeed:    fastRandUint32(),
-		tcpF:       TCPF{tcpF: iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF}, clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
+		handle:   handle,
+		srcPort:  uint16(cfg.Port),
+		dscp:     uint8(cfg.PCAP.DSCP),
+		baseTime: uint32(time.Now().UnixNano() / int64(time.Millisecond)),
+		seqSeed:  fastRandUint32(),
+		tcpF:     TCPF{tcpF: iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF}, clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
 		ethPool: sync.Pool{
 			New: func() any {
 				return &layers.Ethernet{SrcMAC: cfg.Interface.HardwareAddr}
@@ -121,6 +132,11 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 		bufPool: sync.Pool{
 			New: func() any {
 				return gopacket.NewSerializeBuffer()
+			},
+		},
+		optsPool: sync.Pool{
+			New: func() any {
+				return newTCPOpts(mssBytes)
 			},
 		},
 	}
@@ -170,7 +186,7 @@ func (h *SendHandle) buildIPv6Header(dstIP net.IP) *layers.IPv6 {
 	return ip
 }
 
-func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF) *layers.TCP {
+func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF, opts *tcpOpts) *layers.TCP {
 	tcp := h.tcpPool.Get().(*layers.TCP)
 	// Window: randomize between 64240–65535 to avoid static fingerprint
 	window := uint16(64240 + fastRandUint32()%1296)
@@ -186,9 +202,9 @@ func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF) *layers.TCP {
 	jitter := fastRandUint32() % 8
 	tsVal := h.baseTime + (counter >> 3) + jitter
 	if f.SYN {
-		binary.BigEndian.PutUint32(h.synOptions[2].OptionData[0:4], tsVal)
-		binary.BigEndian.PutUint32(h.synOptions[2].OptionData[4:8], 0)
-		tcp.Options = h.synOptions
+		binary.BigEndian.PutUint32(opts.ts[0:4], tsVal)
+		binary.BigEndian.PutUint32(opts.ts[4:8], 0)
+		tcp.Options = opts.syn
 		// Seq: seed-based + counter with jitter
 		tcp.Seq = h.seqSeed + counter*1461 + fastRandUint32()%64
 		tcp.Ack = 0
@@ -197,9 +213,9 @@ func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF) *layers.TCP {
 		}
 	} else {
 		tsEcr := tsVal - (counter%200 + 50) - fastRandUint32()%10
-		binary.BigEndian.PutUint32(h.ackOptions[2].OptionData[0:4], tsVal)
-		binary.BigEndian.PutUint32(h.ackOptions[2].OptionData[4:8], tsEcr)
-		tcp.Options = h.ackOptions
+		binary.BigEndian.PutUint32(opts.ts[0:4], tsVal)
+		binary.BigEndian.PutUint32(opts.ts[4:8], tsEcr)
+		tcp.Options = opts.ack
 		// Seq/Ack: seed-based with realistic-looking increments and jitter
 		dataLen := fastRandUint32()%1400 + 100
 		seq := h.seqSeed + counter*1461 + fastRandUint32()%64
@@ -223,7 +239,9 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 	dstPort := uint16(addr.Port)
 
 	f := h.getClientTCPF(dstIP, dstPort)
-	tcpLayer := h.buildTCPHeader(dstPort, f)
+	tcpOpt := h.optsPool.Get().(*tcpOpts)
+	defer h.optsPool.Put(tcpOpt)
+	tcpLayer := h.buildTCPHeader(dstPort, f, tcpOpt)
 	defer h.tcpPool.Put(tcpLayer)
 
 	var ipLayer gopacket.SerializableLayer
