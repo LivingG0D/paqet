@@ -68,7 +68,7 @@ func (c *Client) scaleConnections(ctx context.Context) {
 
 	// Scale up: all connections overloaded and below max
 	if allOverloaded && numConns < c.maxConns {
-		tc, err := newTimedConn(ctx, c.cfg)
+		tc, err := newTimedConn(c.cfg)
 		if err != nil {
 			flog.Errorf("autoscale: failed to create new connection: %v", err)
 			return

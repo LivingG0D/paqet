@@ -5,9 +5,6 @@ import (
 	"fmt"
 	randv2 "math/rand/v2"
 	"net"
-	"paqet/internal/conf"
-	"paqet/internal/pkg/hash"
-	"paqet/internal/pkg/iterator"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -16,6 +13,10 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcap"
+
+	"paqet/internal/conf"
+	"paqet/internal/pkg/hash"
+	"paqet/internal/pkg/iterator"
 )
 
 type TCPF struct {
@@ -26,6 +27,7 @@ type TCPF struct {
 
 type SendHandle struct {
 	handle      *pcap.Handle
+	writeMu     sync.Mutex
 	srcIPv4     net.IP
 	srcIPv4RHWA net.HardwareAddr
 	srcIPv6     net.IP
@@ -86,7 +88,7 @@ func fastRandUint32() uint32 {
 }
 
 func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
-	handle, err := newHandle(cfg)
+	handle, err := newHandle(cfg, pcap.BlockForever)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open pcap handle: %w", err)
 	}
@@ -265,7 +267,12 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 	if err := gopacket.SerializeLayers(buf, opts, ethLayer, ipLayer, tcpLayer, gopacket.Payload(payload)); err != nil {
 		return err
 	}
-	return h.handle.WritePacketData(buf.Bytes())
+
+	// pcap_sendpacket is not guaranteed thread-safe.
+	h.writeMu.Lock()
+	err := h.handle.WritePacketData(buf.Bytes())
+	h.writeMu.Unlock()
+	return err
 }
 
 func (h *SendHandle) getClientTCPF(dstIP net.IP, dstPort uint16) conf.TCPF {
@@ -278,9 +285,22 @@ func (h *SendHandle) getClientTCPF(dstIP net.IP, dstPort uint16) conf.TCPF {
 }
 
 func (h *SendHandle) setClientTCPF(addr net.Addr, f []conf.TCPF) {
-	a := *addr.(*net.UDPAddr)
+	a, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return
+	}
 	h.tcpF.mu.Lock()
 	h.tcpF.clientTCPF[hash.IPAddr(a.IP, uint16(a.Port))] = &iterator.Iterator[conf.TCPF]{Items: f}
+	h.tcpF.mu.Unlock()
+}
+
+func (h *SendHandle) deleteClientTCPF(addr net.Addr) {
+	a, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return
+	}
+	h.tcpF.mu.Lock()
+	delete(h.tcpF.clientTCPF, hash.IPAddr(a.IP, uint16(a.Port)))
 	h.tcpF.mu.Unlock()
 }
 

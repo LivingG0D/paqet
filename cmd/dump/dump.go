@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"paqet/internal/conf"
 	"paqet/internal/socket"
-
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -48,7 +48,7 @@ var Cmd = &cobra.Command{
 		defer cancel()
 
 		netCfg := cfg.Network
-		packetConn, err := socket.New(ctx, &netCfg)
+		packetConn, err := socket.New(&netCfg)
 		if err != nil {
 			log.Fatalf("Failed to create raw socket: %v", err)
 		}

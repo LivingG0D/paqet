@@ -27,7 +27,7 @@ go vet ./...
 
 - Only `internal/protocol` and `internal/socket` carry tests; everything else is exercised via the binary.
 - **Windows hosts cannot build directly** (CGO+libpcap, cross-compile is painful). Build on Linux (native, WSL, or Docker). Windows uses Npcap + MinGW.
-- **Release binaries** are static, multi-arch (linux amd64/arm64/arm32/mips*, windows, darwin) built by `.github/workflows/build.yml`: it compiles a **static libpcap with musl**, links via `-linkmode external -extldflags '-static'`, and injects build metadata with `-ldflags "-X 'paqet/cmd/version.Version=...'"` (also `GitCommit`, `GitTag`, `BuildTime`). Reproduce that recipe for production binaries, not a plain `go build`.
+- **Release binaries** are static, multi-arch (linux amd64/arm64/arm32/mips*, windows, darwin) built by `.github/workflows/build-release.yml`: Linux targets build **inside `muslcc/x86_64:*` Docker containers**, compiling a **static libpcap with musl** and linking via `-linkmode external -extldflags '-static'`, and injects build metadata with `-ldflags "-X 'paqet/cmd/version.Version=...'"` (also `GitCommit`, `GitTag`, `BuildTime`). Reproduce that recipe for production binaries, not a plain `go build`.
 
 ## Server runtime requirement (non-obvious, breaks silently)
 

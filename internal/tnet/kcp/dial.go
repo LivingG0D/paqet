@@ -3,28 +3,35 @@ package kcp
 import (
 	"fmt"
 	"net"
-	"paqet/internal/conf"
-	"paqet/internal/flog"
-	"paqet/internal/socket"
-	"paqet/internal/tnet"
 
 	"github.com/xtaci/kcp-go/v5"
 	"github.com/xtaci/smux"
+
+	"paqet/internal/conf"
+	"paqet/internal/socket"
+	"paqet/internal/tnet"
 )
 
-func Dial(addr *net.UDPAddr, cfg *conf.KCP, pConn *socket.PacketConn) (tnet.Conn, error) {
-	conn, err := kcp.NewConn(addr.String(), cfg.Block, cfg.Dshard, cfg.Pshard, pConn)
+func Dial(addr *net.UDPAddr, cfg *conf.KCP, netCfg conf.Network) (tnet.Conn, error) {
+	nCfg := netCfg
+	packetConn, err := socket.New(&nCfg)
 	if err != nil {
-		return nil, fmt.Errorf("connection attempt failed: %v", err)
+		return nil, fmt.Errorf("kcp: failed to create packetconn: %w", err)
+	}
+
+	conn, err := kcp.NewConn(addr.String(), cfg.Block, cfg.Dshard, cfg.Pshard, packetConn)
+	if err != nil {
+		packetConn.Close()
+		return nil, fmt.Errorf("kcp: failed to dial connection: %w", err)
 	}
 	aplConf(conn, cfg)
-	flog.Debugf("KCP connection created, creating smux session")
 
 	sess, err := smux.Client(conn, smuxConf(cfg))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create smux session: %w", err)
+		conn.Close()
+		packetConn.Close()
+		return nil, fmt.Errorf("kcp: failed to create smux session: %w", err)
 	}
 
-	flog.Debugf("smux session created successfully")
-	return &Conn{pConn, conn, sess}, nil
+	return &Conn{packetConn, conn, sess}, nil
 }

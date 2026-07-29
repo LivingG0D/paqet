@@ -91,6 +91,43 @@ func TestProtoRoundTripTCPF(t *testing.T) {
 	}
 }
 
+// Regression: an empty host must survive as a non-nil Addr with Host == "".
+// It was once decoded as a nil Addr, crashing the TCP/UDP handlers.
+func TestProtoRoundTripEmptyHost(t *testing.T) {
+	orig := Proto{Type: PTCP, Addr: &tnet.Addr{Host: "", Port: 443}}
+
+	var buf bytes.Buffer
+	if err := orig.Write(&buf); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	var parsed Proto
+	if err := parsed.Read(&buf); err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+	if parsed.Addr == nil {
+		t.Fatal("Addr is nil after round-trip on empty host")
+	}
+	if parsed.Addr.Host != "" {
+		t.Errorf("Host: got %q, want empty", parsed.Addr.Host)
+	}
+	if parsed.Addr.Port != 443 {
+		t.Errorf("Port: got %d, want 443", parsed.Addr.Port)
+	}
+}
+
+// server.handleTCPProtocol/handleUDPProtocol dereference p.Addr without a nil
+// check, relying on these two invariants: a nil Addr can never be written, and
+// a successful PTCP/PUDP read always yields a non-nil Addr.
+func TestProtoNilAddrRejectedOnWrite(t *testing.T) {
+	for _, typ := range []PType{PTCP, PUDP} {
+		orig := Proto{Type: typ, Addr: nil}
+		if err := orig.Write(&bytes.Buffer{}); err == nil {
+			t.Errorf("type 0x%02x: Write accepted a nil Addr, want error", typ)
+		}
+	}
+}
+
 func TestProtoRoundTripHostname(t *testing.T) {
 	addr := &tnet.Addr{Host: "www.google.com", Port: 80}
 	orig := Proto{Type: PTCP, Addr: addr}

@@ -1,13 +1,12 @@
 package ping
 
 import (
-	"context"
 	"log"
+
+	"github.com/spf13/cobra"
 
 	"paqet/internal/conf"
 	"paqet/internal/socket"
-
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -39,7 +38,7 @@ func sendPacket() {
 	}
 
 	netCfg := cfg.Network
-	packetConn, err := socket.New(context.TODO(), &netCfg)
+	packetConn, err := socket.New(&netCfg)
 	if err != nil {
 		log.Fatalf("Failed to create raw socket: %v", err)
 	}

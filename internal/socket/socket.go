@@ -1,14 +1,17 @@
 package socket
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
 	"os"
-	"paqet/internal/conf"
 	"sync/atomic"
 	"time"
+
+	"github.com/gopacket/gopacket/pcap"
+
+	"paqet/internal/conf"
 )
 
 type PacketConn struct {
@@ -17,13 +20,9 @@ type PacketConn struct {
 	recvHandle    *RecvHandle
 	readDeadline  atomic.Value
 	writeDeadline atomic.Value
-
-	ctx    context.Context
-	cancel context.CancelFunc
 }
 
-// &OpError{Op: "listen", Net: network, Source: nil, Addr: nil, Err: err}
-func New(ctx context.Context, cfg *conf.Network) (*PacketConn, error) {
+func New(cfg *conf.Network) (*PacketConn, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 32768 + rand.Intn(32768)
 	}
@@ -35,38 +34,60 @@ func New(ctx context.Context, cfg *conf.Network) (*PacketConn, error) {
 
 	recvHandle, err := NewRecvHandle(cfg)
 	if err != nil {
+		sendHandle.Close()
 		return nil, fmt.Errorf("failed to create receive handle on %s: %v", cfg.Interface.Name, err)
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
 	conn := &PacketConn{
 		cfg:        cfg,
 		sendHandle: sendHandle,
 		recvHandle: recvHandle,
-		ctx:        ctx,
-		cancel:     cancel,
 	}
 
 	return conn, nil
 }
 
 func (c *PacketConn) ReadFrom(data []byte) (n int, addr net.Addr, err error) {
-	if d, ok := c.readDeadline.Load().(time.Time); ok && !d.IsZero() && time.Now().After(d) {
-		return 0, nil, os.ErrDeadlineExceeded
+	var timer *time.Timer
+	var deadline <-chan time.Time
+	if d, ok := c.readDeadline.Load().(time.Time); ok && !d.IsZero() {
+		timer = time.NewTimer(time.Until(d))
+		defer timer.Stop()
+		deadline = timer.C
 	}
 
-	payload, addr, err := c.recvHandle.Read()
-	if err != nil {
-		return 0, nil, err
-	}
-	n = copy(data, payload)
+	for {
+		select {
+		case <-deadline:
+			return 0, nil, os.ErrDeadlineExceeded
+		default:
+		}
 
-	return n, addr, nil
+		p, addr, err := c.recvHandle.Read()
+		if err != nil {
+			if errors.Is(err, pcap.NextErrorTimeoutExpired) {
+				continue
+			}
+			return 0, nil, err
+		}
+
+		return copy(data, p), addr, nil
+	}
 }
 
 func (c *PacketConn) WriteTo(data []byte, addr net.Addr) (n int, err error) {
-	if d, ok := c.writeDeadline.Load().(time.Time); ok && !d.IsZero() && time.Now().After(d) {
+	var timer *time.Timer
+	var deadline <-chan time.Time
+	if d, ok := c.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
+		timer = time.NewTimer(time.Until(d))
+		defer timer.Stop()
+		deadline = timer.C
+	}
+
+	select {
+	case <-deadline:
 		return 0, os.ErrDeadlineExceeded
+	default:
 	}
 
 	daddr, ok := addr.(*net.UDPAddr)
@@ -83,15 +104,12 @@ func (c *PacketConn) WriteTo(data []byte, addr net.Addr) (n int, err error) {
 }
 
 func (c *PacketConn) Close() error {
-	c.cancel()
-
 	if c.sendHandle != nil {
-		go c.sendHandle.Close()
+		c.sendHandle.Close()
 	}
 	if c.recvHandle != nil {
-		go c.recvHandle.Close()
+		c.recvHandle.Close()
 	}
-
 	return nil
 }
 
@@ -126,4 +144,8 @@ func (c *PacketConn) SetDSCP(dscp int) error {
 
 func (c *PacketConn) SetClientTCPF(addr net.Addr, f []conf.TCPF) {
 	c.sendHandle.setClientTCPF(addr, f)
+}
+
+func (c *PacketConn) DeleteClientTCPF(addr net.Addr) {
+	c.sendHandle.deleteClientTCPF(addr)
 }

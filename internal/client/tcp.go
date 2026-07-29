@@ -1,17 +1,21 @@
 package client
 
 import (
+	"context"
+
 	"paqet/internal/flog"
 	"paqet/internal/protocol"
 	"paqet/internal/tnet"
 )
 
-func (c *Client) TCP(addr string) (tnet.Strm, error) {
-	strm, err := c.newStrm()
+func (c *Client) TCP(ctx context.Context, addr string) (tnet.Strm, error) {
+	strm, err := c.newStrm(ctx)
 	if err != nil {
 		flog.Debugf("failed to create stream for TCP %s: %v", addr, err)
 		return nil, err
 	}
+	stop := context.AfterFunc(ctx, func() { strm.Close() })
+	defer stop()
 
 	tAddr, err := tnet.NewAddr(addr)
 	if err != nil {
@@ -23,7 +27,7 @@ func (c *Client) TCP(addr string) (tnet.Strm, error) {
 	p := protocol.Proto{Type: protocol.PTCP, Addr: tAddr}
 	err = p.Write(strm)
 	if err != nil {
-		flog.Debugf("failed to write TCP protocol header for %s on stream %d: %v", addr, strm.SID(), err)
+		flog.Debugf("failed to write TCP protocol for %s on stream %d: %v", addr, strm.SID(), err)
 		strm.Close()
 		return nil, err
 	}

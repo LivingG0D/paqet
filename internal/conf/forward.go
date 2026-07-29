@@ -2,15 +2,13 @@ package conf
 
 import (
 	"net"
-	"paqet/internal/tnet"
 )
 
 type Forward struct {
 	Listen_  string       `yaml:"listen"`
-	Target_  string       `yaml:"target"`
+	Target   string       `yaml:"target"`
 	Protocol string       `yaml:"protocol"`
 	Listen   *net.UDPAddr `yaml:"-"`
-	Target   *tnet.Addr   `yaml:"-"`
 }
 
 func (c *Forward) setDefaults() {}
@@ -22,11 +20,9 @@ func (c *Forward) validate() []error {
 	}
 	c.Listen = l
 
-	t, err := tnet.NewAddr(c.Target_)
-	if err != nil {
+	if err := validateHostPort(c.Target, true); err != nil {
 		errors = append(errors, err)
 	}
-	c.Target = t
 
 	return errors
 }

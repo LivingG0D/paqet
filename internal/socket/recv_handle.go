@@ -3,12 +3,14 @@ package socket
 import (
 	"fmt"
 	"net"
-	"paqet/internal/conf"
 	"runtime"
+	"time"
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcap"
+
+	"paqet/internal/conf"
 )
 
 type RecvHandle struct {
@@ -22,7 +24,7 @@ type RecvHandle struct {
 }
 
 func NewRecvHandle(cfg *conf.Network) (*RecvHandle, error) {
-	handle, err := newHandle(cfg)
+	handle, err := newHandle(cfg, time.Millisecond)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open pcap handle: %w", err)
 	}

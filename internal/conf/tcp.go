@@ -51,6 +51,15 @@ func (t *TCP) validate() []error {
 	if len(t.LF) == 0 || len(t.RF) == 0 {
 		errors = append(errors, fmt.Errorf("at least one TCP flag combination required"))
 	}
+
+	maxTCPFLen := 64
+	if len(t.LF_) > maxTCPFLen {
+		errors = append(errors, fmt.Errorf("local_flag exceeds max %d", maxTCPFLen))
+	}
+	if len(t.RF_) > maxTCPFLen {
+		errors = append(errors, fmt.Errorf("remote_flag exceeds max %d", maxTCPFLen))
+	}
+
 	return errors
 }
 

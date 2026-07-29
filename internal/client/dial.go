@@ -1,10 +1,12 @@
 package client
 
 import (
+	"context"
 	"fmt"
+	"time"
+
 	"paqet/internal/flog"
 	"paqet/internal/tnet"
-	"time"
 )
 
 func (c *Client) newConn() (tnet.Conn, error) {
@@ -38,27 +40,40 @@ func (c *Client) newConn() (tnet.Conn, error) {
 		if bestTC.conn != nil {
 			bestTC.conn.Close()
 		}
-		if conn, err := bestTC.createConn(); err == nil {
-			bestTC.conn = conn
+		conn, err := bestTC.createConn()
+		if err != nil {
+			return nil, err
 		}
+		bestTC.conn = conn
 		bestTC.expire = time.Now().Add(time.Duration(autoExpire) * time.Second)
 	}
 	return bestTC.conn, nil
 }
 
-func (c *Client) newStrm() (tnet.Strm, error) {
+func (c *Client) newStrm(ctx context.Context) (tnet.Strm, error) {
 	const maxRetries = 5
 	for i := range maxRetries {
+		// Backoff before every attempt but the first: 100ms, 200ms, 400ms, 800ms.
+		// Bounded + ctx-aware so a persistently failing server neither hot-loops
+		// nor blocks shutdown.
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(1<<(i-1)) * 100 * time.Millisecond):
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		conn, err := c.newConn()
 		if err != nil {
-			flog.Debugf("session creation failed (attempt %d/%d), retrying", i+1, maxRetries)
-			time.Sleep(time.Duration(1<<i) * 100 * time.Millisecond)
+			flog.Debugf("session creation failed (attempt %d/%d), retrying: %v", i+1, maxRetries, err)
 			continue
 		}
 		strm, err := conn.OpenStrm()
 		if err != nil {
 			flog.Debugf("failed to open stream (attempt %d/%d), retrying: %v", i+1, maxRetries, err)
-			time.Sleep(time.Duration(1<<i) * 100 * time.Millisecond)
 			continue
 		}
 		return strm, nil

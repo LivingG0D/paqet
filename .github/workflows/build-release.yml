@@ -18,95 +18,35 @@ jobs:
                     - goarch: amd64
                       filename: amd64
                       container: muslcc/x86_64:x86_64-linux-musl
+                      host: ""
                     - goarch: arm64
                       filename: arm64
                       container: muslcc/x86_64:aarch64-linux-musl
+                      host: aarch64-linux-musl
                     - goarch: arm
                       filename: arm32
                       container: muslcc/x86_64:arm-linux-musleabihf
+                      host: arm-linux-musleabihf
                     - goarch: mips
                       filename: mips
                       container: muslcc/x86_64:mips-linux-muslsf
+                      host: mips-linux-muslsf
                     - goarch: mipsle
                       filename: mipsle
                       container: muslcc/x86_64:mipsel-linux-muslsf
+                      host: mipsel-linux-muslsf
                     - goarch: mips64
                       filename: mips64
                       container: muslcc/x86_64:mips64-linux-musl
+                      host: mips64-linux-musl
                     - goarch: mips64le
                       filename: mips64le
                       container: muslcc/x86_64:mips64el-linux-musl
-
-        container:
-            image: ${{ matrix.container }}
+                      host: mips64el-linux-musl
 
         steps:
-            - name: Install Build Dependencies
-              run: |
-                  apk update
-                  apk add --no-cache git bash tar gzip wget flex bison linux-headers make
-
-            - name: Install Go
-              run: |
-                  GO_VERSION=1.26.0
-                  GO_ARCH=amd64
-                  
-                  wget -q https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz
-                  tar -C /usr/local -xzf go${GO_VERSION}.linux-${GO_ARCH}.tar.gz
-                  rm go${GO_VERSION}.linux-${GO_ARCH}.tar.gz
-                  
-                  # Add Go to PATH
-                  echo "/usr/local/go/bin" >> $GITHUB_PATH
-                  export PATH=$PATH:/usr/local/go/bin
-
             - name: Checkout Code
-              run: |
-                  git config --global --add safe.directory $GITHUB_WORKSPACE
-                  git clone --depth 1 --branch ${GITHUB_REF#refs/heads/} https://github.com/${{ github.repository }} . 2>/dev/null || \
-                  git clone --depth 1 --branch ${GITHUB_REF#refs/tags/} https://github.com/${{ github.repository }} . 2>/dev/null || \
-                  git clone https://github.com/${{ github.repository }} .
-                  git checkout ${{ github.sha }}
-
-            - name: Build Static libpcap
-              run: |
-                  set -e
-                  
-                  # Download libpcap
-                  LIBPCAP_VERSION=1.10.6
-                  wget -q https://www.tcpdump.org/release/libpcap-${LIBPCAP_VERSION}.tar.gz
-                  tar -xzf libpcap-${LIBPCAP_VERSION}.tar.gz
-                  cd libpcap-${LIBPCAP_VERSION}
-                  
-                  CC=gcc
-                  if [ "${{ matrix.goarch }}" = "amd64" ]; then
-                    HOST_FLAG=""
-                  elif [ "${{ matrix.goarch }}" = "arm64" ]; then
-                    HOST_FLAG="--host=aarch64-linux-musl"
-                  elif [ "${{ matrix.goarch }}" = "arm" ]; then
-                    HOST_FLAG="--host=arm-linux-musleabihf"
-                  elif [ "${{ matrix.goarch }}" = "mips" ]; then
-                    HOST_FLAG="--host=mips-linux-muslsf"
-                  elif [ "${{ matrix.goarch }}" = "mipsle" ]; then
-                    HOST_FLAG="--host=mipsel-linux-muslsf"
-                  elif [ "${{ matrix.goarch }}" = "mips64" ]; then
-                    HOST_FLAG="--host=mips64-linux-musl"
-                  elif [ "${{ matrix.goarch }}" = "mips64le" ]; then
-                    HOST_FLAG="--host=mips64el-linux-musl"
-                  fi
-                  
-                  # Configure and build libpcap
-                  ./configure ${HOST_FLAG} \
-                    --prefix=/opt/libpcap \
-                    --disable-shared \
-                    --disable-dbus \
-                    --disable-bluetooth \
-                    --disable-usb \
-                    --with-pcap=linux
-                  
-                  make -j$(nproc)
-                  make install
-                  
-                  cd ..
+              uses: actions/checkout@v7
 
             - name: Get tag or commit
               id: ref_id
@@ -121,41 +61,50 @@ jobs:
                   fi
                   echo "ref=$REF_ID" >> $GITHUB_OUTPUT
 
-            - name: Build
+            - name: Build in musl container
               run: |
                   mkdir -p dist
+                  docker run --rm -i \
+                    -v "$PWD:/src" -w /src \
+                    -e GOARCH=${{ matrix.goarch }} \
+                    -e FILENAME=${{ matrix.filename }} \
+                    -e HOST_TRIPLE='${{ matrix.host }}' \
+                    -e VERSION='${{ steps.ref_id.outputs.ref }}' \
+                    ${{ matrix.container }} \
+                    sh -eus <<'EOF'
+                  apk update
+                  apk add --no-cache git bash tar gzip wget flex bison linux-headers make
 
-                  export CGO_ENABLED=1 
-                  export GOOS=linux 
-                  export GOARCH=${{ matrix.goarch }}
-                  export CC=gcc
-                  export VERSION=${{ steps.ref_id.outputs.ref }}
-                  export GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-                  export GIT_TAG=$(git describe --tags --exact-match 2>/dev/null || echo "unknown")
-                  export BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-                  
-                  # Set PKG_CONFIG_PATH for libpcap
+                  GO_VERSION=1.26.4
+                  wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
+                  tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
+                  export PATH=$PATH:/usr/local/go/bin
+                  git config --global --add safe.directory /src
+
+                  LIBPCAP_VERSION=1.10.6
+                  wget -q https://www.tcpdump.org/release/libpcap-${LIBPCAP_VERSION}.tar.gz
+                  tar -xzf libpcap-${LIBPCAP_VERSION}.tar.gz
+                  cd libpcap-${LIBPCAP_VERSION}
+                  [ -n "$HOST_TRIPLE" ] && HOST_FLAG="--host=$HOST_TRIPLE" || HOST_FLAG=""
+                  ./configure ${HOST_FLAG} --prefix=/opt/libpcap \
+                    --disable-shared --disable-dbus --disable-bluetooth \
+                    --disable-usb --with-pcap=linux
+                  make -j$(nproc)
+                  make install
+                  cd ..
+
+                  export CGO_ENABLED=1 GOOS=linux CC=gcc
+                  export GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown)
+                  export GIT_TAG=$(git describe --tags --exact-match 2>/dev/null || echo unknown)
+                  export BUILD_TIME=$(date -u "+%Y-%m-%d %H:%M:%S UTC")
                   export PKG_CONFIG_PATH=/opt/libpcap/lib/pkgconfig
                   export CGO_CFLAGS="-I/opt/libpcap/include"
                   export CGO_LDFLAGS="-L/opt/libpcap/lib -lpcap"
 
-                  # Set GOARM for arm32
-                  if [ "$GOARCH" = "arm" ]; then
-                    export GOARM=7
-                  fi
-                  
-                  if [ "$GOARCH" = "mips" ] || [ "$GOARCH" = "mipsle" ]; then
-                    export GOMIPS=softfloat
-                  fi
-                  if [ "$GOARCH" = "mips64" ] || [ "$GOARCH" = "mips64le" ]; then
-                    export GOMIPS64=hardfloat
-                  fi
-
-                  if [ "$GOARCH" = "mips" ] || [ "$GOARCH" = "mipsle" ] || [ "$GOARCH" = "mips64" ] || [ "$GOARCH" = "mips64le" ]; then
-                    GCFLAGS=""
-                  else
-                    GCFLAGS="all=-l=4"
-                  fi
+                  [ "$GOARCH" = arm ] && export GOARM=7
+                  case "$GOARCH" in mips|mipsle) export GOMIPS=softfloat;; esac
+                  case "$GOARCH" in mips64|mips64le) export GOMIPS64=hardfloat;; esac
+                  case "$GOARCH" in mips|mipsle|mips64|mips64le) GCFLAGS="";; *) GCFLAGS="all=-l=4";; esac
 
                   go build -v -a -trimpath \
                     -gcflags "${GCFLAGS}" \
@@ -164,17 +113,16 @@ jobs:
                     -X 'paqet/cmd/version.GitCommit=${GIT_COMMIT}' \
                     -X 'paqet/cmd/version.GitTag=${GIT_TAG}' \
                     -X 'paqet/cmd/version.BuildTime=${BUILD_TIME}'" \
-                    -o paqet_linux_${{ matrix.filename }} ./cmd/main.go
+                    -o paqet_linux_${FILENAME} ./cmd/main.go
 
-                  chmod +x paqet_linux_${{ matrix.filename }}
-                  tar -czvf dist/paqet-linux-${{ matrix.filename }}-${{ steps.ref_id.outputs.ref }}.tar.gz \
-                    paqet_linux_${{ matrix.filename }} \
-                    README.md \
-                    example/client.yaml.example \
-                    example/server.yaml.example
+                  chmod +x paqet_linux_${FILENAME}
+                  tar -czvf dist/paqet-linux-${FILENAME}-${VERSION}.tar.gz \
+                    paqet_linux_${FILENAME} README.md \
+                    example/client.yaml.example example/server.yaml.example
+                  EOF
 
             - name: Upload Artifact
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v7
               with:
                   name: paqet-linux-${{ matrix.filename }}
                   path: dist/paqet-linux-${{ matrix.filename }}-${{ steps.ref_id.outputs.ref }}.tar.gz
@@ -194,10 +142,10 @@ jobs:
                   choco install mingw -y
 
             - name: Checkout Code
-              uses: actions/checkout@v6
+              uses: actions/checkout@v7
 
             - name: Setup Go
-              uses: actions/setup-go@v6
+              uses: actions/setup-go@v7
               with:
                   go-version: "1.26"
 
@@ -218,8 +166,8 @@ jobs:
               shell: bash
               run: |
                   mkdir -p dist
-                  export CGO_ENABLED=1 
-                  export GOOS=windows 
+                  export CGO_ENABLED=1
+                  export GOOS=windows
                   export GOARCH=${{ matrix.goarch }}
                   export VERSION=${{ steps.ref_id.outputs.ref }}
                   export GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -242,7 +190,7 @@ jobs:
                     example/server.yaml.example
 
             - name: Upload Artifact
-              uses: actions/upload-artifact@v6
+              uses: actions/upload-artifact@v7
               with:
                   name: paqet-windows-${{ matrix.goarch }}
                   path: dist/paqet-windows-${{ matrix.goarch }}-${{ steps.ref_id.outputs.ref }}.zip
@@ -255,10 +203,10 @@ jobs:
                 goarch: [amd64, arm64]
         steps:
             - name: Checkout Code
-              uses: actions/checkout@v6
+              uses: actions/checkout@v7
 
             - name: Setup Go
-              uses: actions/setup-go@v6
+              uses: actions/setup-go@v7
               with:
                   go-version: "1.26"
 
@@ -277,8 +225,8 @@ jobs:
             - name: Build
               run: |
                   mkdir -p dist
-                  export CGO_ENABLED=1 
-                  export GOOS=darwin 
+                  export CGO_ENABLED=1
+                  export GOOS=darwin
                   export GOARCH=${{ matrix.goarch }}
                   export VERSION=${{ steps.ref_id.outputs.ref }}
                   export GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -302,7 +250,7 @@ jobs:
                     example/server.yaml.example
 
             - name: Upload Artifact
-              uses: actions/upload-artifact@v6
+              uses: actions/upload-artifact@v7
               with:
                   name: paqet-darwin-${{ matrix.goarch }}
                   path: dist/paqet-darwin-${{ matrix.goarch }}-${{ steps.ref_id.outputs.ref }}.tar.gz
@@ -314,14 +262,14 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         steps:
             - name: Download all build artifacts
-              uses: actions/download-artifact@v7
+              uses: actions/download-artifact@v8
               with:
                   path: ./dist
                   pattern: paqet-*
                   merge-multiple: true
 
             - name: Create Release
-              uses: softprops/action-gh-release@v2
+              uses: softprops/action-gh-release@v3
               with:
                   files: dist/*
               env:

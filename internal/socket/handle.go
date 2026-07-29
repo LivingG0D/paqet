@@ -2,13 +2,15 @@ package socket
 
 import (
 	"fmt"
-	"paqet/internal/conf"
 	"runtime"
+	"time"
 
 	"github.com/gopacket/gopacket/pcap"
+
+	"paqet/internal/conf"
 )
 
-func newHandle(cfg *conf.Network) (*pcap.Handle, error) {
+func newHandle(cfg *conf.Network, timeout time.Duration) (*pcap.Handle, error) {
 	// On Windows, use the GUID field to construct the NPF device name
 	// On other platforms, use the interface name directly
 	ifaceName := cfg.Interface.Name
@@ -32,7 +34,7 @@ func newHandle(cfg *conf.Network) (*pcap.Handle, error) {
 	if err = inactive.SetPromisc(cfg.PCAP.Promisc); err != nil {
 		return nil, fmt.Errorf("failed to set promiscuous mode: %v", err)
 	}
-	if err = inactive.SetTimeout(pcap.BlockForever); err != nil {
+	if err = inactive.SetTimeout(timeout); err != nil {
 		return nil, fmt.Errorf("failed to set pcap timeout: %v", err)
 	}
 	if err = inactive.SetImmediateMode(true); err != nil {

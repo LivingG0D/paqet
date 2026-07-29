@@ -2,11 +2,12 @@ package client
 
 import (
 	"context"
+	"sync"
+
 	"paqet/internal/conf"
 	"paqet/internal/flog"
 	"paqet/internal/pkg/iterator"
 	"paqet/internal/tnet"
-	"sync"
 	"time"
 )
 
@@ -32,7 +33,7 @@ func New(cfg *conf.Conf) (*Client, error) {
 
 func (c *Client) Start(ctx context.Context) error {
 	for i := range c.cfg.Transport.Conn {
-		tc, err := newTimedConn(ctx, c.cfg)
+		tc, err := newTimedConn(c.cfg)
 		if err != nil {
 			flog.Errorf("failed to create connection %d: %v", i+1, err)
 			return err
@@ -40,7 +41,6 @@ func (c *Client) Start(ctx context.Context) error {
 		flog.Debugf("client connection %d created successfully", i+1)
 		c.iter.Items = append(c.iter.Items, tc)
 	}
-	go c.ticker(ctx)
 
 	stats := flog.NewStatsReporter(30 * time.Second)
 	stats.SetConnFunc(func() []flog.ConnStats {
@@ -59,13 +59,13 @@ func (c *Client) Start(ctx context.Context) error {
 	})
 	stats.Start()
 
+	go c.ticker(ctx)
 	go func() {
 		<-ctx.Done()
 		stats.Stop()
 		for _, tc := range c.iter.Items {
 			tc.close()
 		}
-		flog.Infof("client shutdown complete")
 	}()
 
 	ipv4Addr := "<nil>"
