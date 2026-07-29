@@ -8,16 +8,15 @@ import (
 )
 
 const (
-	windowTuneInterval = 10 * time.Second
-	connScaleInterval  = 30 * time.Second
-	maxStreamsPerConn  = 64
-	idleTimeout        = 60 * time.Second
+	connScaleInterval = 30 * time.Second
+	maxStreamsPerConn = 64
 )
 
+// ticker drives connection autoscaling. Window tuning is not done here — each
+// connection gets its own kcp.AutoTuner goroutine (see startAutoTuners), which
+// runs its own tuning loop.
 func (c *Client) ticker(ctx context.Context) {
-	windowTicker := time.NewTicker(windowTuneInterval)
 	connScaleTicker := time.NewTicker(connScaleInterval)
-	defer windowTicker.Stop()
 	defer connScaleTicker.Stop()
 
 	// Start auto-tuners for initial connections
