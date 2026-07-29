@@ -31,6 +31,26 @@ func New(cfg *conf.Conf) (*Client, error) {
 	return c, nil
 }
 
+// closeConns snapshots the live conns under c.mu, then closes them outside it.
+// Both c.iter.Items (rewritten by scaleConnections) and timedConn.conn
+// (reassigned by newConn) are mutated under c.mu, so neither the slice header
+// nor the field is safe to read unsynchronized. Closing happens outside the
+// lock so teardown never blocks newConn on the per-stream dial path.
+func (c *Client) closeConns() {
+	c.mu.Lock()
+	conns := make([]tnet.Conn, 0, len(c.iter.Items))
+	for _, tc := range c.iter.Items {
+		if tc.conn != nil {
+			conns = append(conns, tc.conn)
+		}
+	}
+	c.mu.Unlock()
+
+	for _, conn := range conns {
+		conn.Close()
+	}
+}
+
 func (c *Client) Start(ctx context.Context) error {
 	for i := range c.cfg.Transport.Conn {
 		tc, err := newTimedConn(c.cfg)
@@ -59,13 +79,14 @@ func (c *Client) Start(ctx context.Context) error {
 	})
 	stats.Start()
 
+	// Snapshot the startup count before the ticker goroutine can resize the pool.
+	numConns := len(c.iter.Items)
+
 	go c.ticker(ctx)
 	go func() {
 		<-ctx.Done()
 		stats.Stop()
-		for _, tc := range c.iter.Items {
-			tc.close()
-		}
+		c.closeConns()
 	}()
 
 	ipv4Addr := "<nil>"
@@ -76,6 +97,6 @@ func (c *Client) Start(ctx context.Context) error {
 	if c.cfg.Network.IPv6.Addr != nil {
 		ipv6Addr = c.cfg.Network.IPv6.Addr.IP.String()
 	}
-	flog.Infof("Client started: IPv4:%s IPv6:%s -> %s (%d connections)", ipv4Addr, ipv6Addr, c.cfg.Server.Addr, len(c.iter.Items))
+	flog.Infof("Client started: IPv4:%s IPv6:%s -> %s (%d connections)", ipv4Addr, ipv6Addr, c.cfg.Server.Addr, numConns)
 	return nil
 }
