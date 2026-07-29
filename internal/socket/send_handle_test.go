@@ -2,6 +2,8 @@ package socket
 
 import (
 	"encoding/binary"
+	"errors"
+	"net"
 	"sync"
 	"testing"
 
@@ -111,6 +113,102 @@ func TestBuildTCPHeaderOptionShape(t *testing.T) {
 	}
 	h.tcpPool.Put(ack)
 	h.optsPool.Put(ackOpts)
+}
+
+// TestSendPacketAfterClose pins the guard that keeps a send from reaching a
+// freed pcap handle. gopacket's WritePacketData dereferences the raw handle
+// pointer with no lock and no open check, and Close frees it, so a send that
+// arrives after Close must be rejected before it ever touches the handle.
+//
+// handle is nil here, so the test doubles as proof that sendPacket short-
+// circuits on h.closed: if it fell through to h.handle.WritePacketData it
+// would panic instead of returning.
+func TestSendPacketAfterClose(t *testing.T) {
+	h := newTestSendHandle()
+
+	h.Close()
+
+	if err := h.sendPacket([]byte{0xde, 0xad}); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("sendPacket after Close = %v, want net.ErrClosed", err)
+	}
+}
+
+// TestCloseIdempotent guards against a double Close reaching pcap_close twice
+// on the same pointer. PacketConn.Close is reachable more than once (kcp/smux
+// teardown and the client shutdown path both close conns).
+func TestCloseIdempotent(t *testing.T) {
+	h := newTestSendHandle()
+
+	h.Close()
+	h.Close() // must not panic, must not re-enter pcap_close
+
+	if err := h.sendPacket(nil); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("sendPacket after double Close = %v, want net.ErrClosed", err)
+	}
+}
+
+// TestCloseConcurrent races Close against itself on a handle that is still
+// open, so the winner writes h.closed while the losers read it. That write is
+// what writeMu has to cover in Close; dropping the lock there trips -race here.
+//
+// It must start from an open handle: once h.closed is set, every Close returns
+// at the guard without writing, and a concurrent-Close test that pre-closes
+// would pass with no lock at all.
+func TestCloseConcurrent(t *testing.T) {
+	h := newTestSendHandle()
+
+	const goroutines = 32
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			h.Close()
+		}()
+	}
+	wg.Wait()
+
+	if err := h.sendPacket([]byte{0x01}); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("sendPacket after concurrent Close = %v, want net.ErrClosed", err)
+	}
+}
+
+// TestSendAfterCloseConcurrent covers the read side: many senders hitting the
+// h.closed guard at once, all of which must be rejected rather than reaching
+// the freed handle. Run with -race.
+//
+// The handle is closed up front on purpose. handle is nil in tests, so a send
+// that slipped past the guard would panic instead of failing an assertion —
+// which means this cannot also cover a Close landing while a send is genuinely
+// in flight inside libpcap. That case is what writeMu enforces, and observing
+// it needs a real handle (root plus a capture device), so it is not covered by
+// any test here.
+func TestSendAfterCloseConcurrent(t *testing.T) {
+	h := newTestSendHandle()
+	h.Close()
+
+	const goroutines, iters = 16, 500
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			for range iters {
+				h.Close()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range iters {
+				if err := h.sendPacket([]byte{0x01}); !errors.Is(err, net.ErrClosed) {
+					t.Errorf("sendPacket = %v, want net.ErrClosed", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func assertOptionKinds(t *testing.T, name string, got []layers.TCPOption, want []layers.TCPOptionKind) {

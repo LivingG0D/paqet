@@ -28,6 +28,7 @@ type TCPF struct {
 type SendHandle struct {
 	handle      *pcap.Handle
 	writeMu     sync.Mutex
+	closed      bool // guarded by writeMu; set by Close, checked by sendPacket
 	srcIPv4     net.IP
 	srcIPv4RHWA net.HardwareAddr
 	srcIPv6     net.IP
@@ -268,11 +269,27 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 		return err
 	}
 
-	// pcap_sendpacket is not guaranteed thread-safe.
+	return h.sendPacket(buf.Bytes())
+}
+
+// sendPacket writes one serialized frame to the pcap handle.
+//
+// pcap_sendpacket is not guaranteed thread-safe, and gopacket's write path adds
+// no protection of its own: Handle.WritePacketData calls pcap_sendpacket with
+// the raw handle pointer, taking no lock and never checking whether the handle
+// is still open. Its read path does both, which is why only sends need this.
+//
+// So writeMu serves two purposes here — it serializes concurrent sends, and it
+// orders a send against Close, which frees that pointer. h.closed then rejects
+// any send that arrives after the close, since the freed pointer would
+// otherwise be dereferenced inside libpcap.
+func (h *SendHandle) sendPacket(b []byte) error {
 	h.writeMu.Lock()
-	err := h.handle.WritePacketData(buf.Bytes())
-	h.writeMu.Unlock()
-	return err
+	defer h.writeMu.Unlock()
+	if h.closed {
+		return net.ErrClosed
+	}
+	return h.handle.WritePacketData(b)
 }
 
 func (h *SendHandle) getClientTCPF(dstIP net.IP, dstPort uint16) conf.TCPF {
@@ -304,7 +321,15 @@ func (h *SendHandle) deleteClientTCPF(addr net.Addr) {
 	h.tcpF.mu.Unlock()
 }
 
+// Close shuts down the pcap handle. It is safe to call concurrently with Write
+// and safe to call more than once.
 func (h *SendHandle) Close() {
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+	if h.closed {
+		return
+	}
+	h.closed = true
 	if h.handle != nil {
 		h.handle.Close()
 	}
