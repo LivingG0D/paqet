@@ -4,125 +4,48 @@ import (
 	"context"
 	"paqet/internal/flog"
 	"paqet/internal/tnet"
-	"paqet/internal/tnet/kcp"
 	"time"
 )
 
 const (
 	connScaleInterval = 30 * time.Second
-	maxStreamsPerConn = 64
+	// streamsHigh arms scale-up: the pool grows when the MEAN stream count per
+	// routable conn exceeds it. One proxied connection is one stream, so this is
+	// the concurrent-user signal. 32 is the watermark flog's stats reporter
+	// already alerts on ("stream_overload — increase conn count", stats.go:174);
+	// the autoscaler now acts on it instead of asking the operator to.
+	streamsHigh = 32
+	// streamsLow arms scale-down. The 4:1 gap against streamsHigh is hysteresis,
+	// and it is what makes it arithmetically impossible for scale-down to retire
+	// the conn scale-up just added: growing needs streams > (usable-1)*32,
+	// shrinking needs streams < usable*8, and both hold only when usable < 2 —
+	// which scaleDown already rejects at the minConns gate.
+	streamsLow = 8
 )
 
-// ticker drives connection autoscaling. Window tuning is not done here — each
-// connection gets its own kcp.AutoTuner goroutine (see startAutoTuners), which
-// runs its own tuning loop.
+// ticker drives connection autoscaling. The pool tracks live stream count,
+// which is the proxy for concurrent users.
+//
+// Window sizes are not tuned here. They are set once per session from the
+// operator's config (tnet/kcp.aplConf). A loss-driven window controller used to
+// live in this file; it was removed because on this transport 8% retransmission
+// is the documented normal operating point (commit 9d5c72c), so any loss
+// threshold low enough to react is below the baseline and only ratchets the
+// window down — and on a DPI-evasion tunnel that hands a censor a throttle.
 func (c *Client) ticker(ctx context.Context) {
-	connScaleTicker := time.NewTicker(connScaleInterval)
-	defer connScaleTicker.Stop()
-
-	// Start auto-tuners for initial connections
-	c.startAutoTuners()
+	t := time.NewTicker(connScaleInterval)
+	defer t.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-connScaleTicker.C:
+		case <-t.C:
 			c.repairDead(ctx)
-			c.scaleConnections(ctx)
+			c.scaleUp()
+			c.scaleDown()
 		}
 	}
-}
-
-// startAutoTuners binds a window auto-tuner to each connection in the pool.
-func (c *Client) startAutoTuners() {
-	type binding struct {
-		tc   *timedConn
-		conn tnet.Conn
-	}
-
-	c.mu.Lock()
-	bindings := make([]binding, 0, len(c.iter.Items))
-	for _, tc := range c.iter.Items {
-		if tc.conn != nil {
-			bindings = append(bindings, binding{tc, tc.conn})
-		}
-	}
-	c.mu.Unlock()
-
-	for _, b := range bindings {
-		c.bindTuner(b.tc, b.conn)
-	}
-}
-
-// bindTuner starts a window auto-tuner for conn and records its canceller on
-// tc, stopping whatever tuner tc held before.
-//
-// AutoTuner captures its conn at construction and never rebinds, so a tuner is
-// only ever valid for one conn: without this, replacing a conn left the old
-// tuner running against a closed session while the new conn was never tuned.
-//
-// Tuners are parented on the client-lifetime ctx, not on the per-request ctx
-// that reaches redial — a tuner must outlive the proxied connection that
-// happened to trigger the redial.
-func (c *Client) bindTuner(tc *timedConn, conn tnet.Conn) {
-	kcpConn, ok := conn.(*kcp.Conn)
-	if !ok {
-		return
-	}
-	at := kcp.NewAutoTuner(
-		kcpConn,
-		c.cfg.Transport.KCP.Sndwnd,
-		c.cfg.Transport.KCP.Rcvwnd,
-	)
-	ctx, cancel := context.WithCancel(c.tunerCtx)
-	if !c.swapTuner(tc, conn, cancel) {
-		cancel()
-		return
-	}
-	go at.Run(ctx)
-}
-
-// swapTuner installs cancel as tc's tuner canceller and stops the previous one,
-// reporting false if the binding is already stale.
-//
-// Callers reach here holding a (tc, conn) pair sampled before c.mu was
-// released, so by now the slot may have been retired by scaleDown or given a
-// different conn by redial. Storing the canceller anyway would either strand a
-// tuner on a slot nobody can cancel from, or cancel the live conn's tuner and
-// leave a zombie running against a closed session. Both are checked under the
-// same lock that publishes tc.conn.
-//
-// The old canceller runs outside c.mu — cancelling is cheap, but the lock gates
-// every new proxied connection and is not worth holding for it.
-func (c *Client) swapTuner(tc *timedConn, conn tnet.Conn, cancel context.CancelFunc) bool {
-	c.mu.Lock()
-	if tc.retired || tc.conn != conn {
-		c.mu.Unlock()
-		return false
-	}
-	old := tc.stopTuner
-	tc.stopTuner = cancel
-	c.mu.Unlock()
-
-	if old != nil {
-		old()
-	}
-	return true
-}
-
-// scaleConnections grows or drains the pool by at most one conn per tick.
-//
-// Like newConn, it keeps dials and teardowns outside c.mu: holding the lock
-// across either would block every new proxied connection for the duration,
-// which on the scale-up path is a full pcap+KCP+smux dial and lands exactly
-// when the pool is already saturated.
-func (c *Client) scaleConnections(ctx context.Context) {
-	// scaleUp reports how many slots existed before it ran, and only those are
-	// eligible for retirement. A conn added this tick has zero streams, which is
-	// exactly what scaleDown selects, so without that bound scale-down would
-	// retire the conn scale-up just added — on every tick, forever.
-	c.scaleDown(c.scaleUp(ctx))
 }
 
 // deadSlots returns the slots whose session has died, with the conn each was
@@ -148,9 +71,9 @@ func (c *Client) deadSlots() ([]*timedConn, []tnet.Conn) {
 // from a closed conn, so a dead slot sitting alongside live ones is never
 // handed out and therefore never redialed. Without this it stays dead for the
 // life of the process — and because a closed conn reports zero streams, it also
-// makes the pool look like it still has spare capacity, which switches scale-up
-// off (see poolSaturated). One blip would otherwise cost a connection
-// permanently and disable autoscaling with it.
+// drags the pool mean down, which switches scale-up off (see poolLoad). One
+// blip would otherwise cost a connection permanently and disable autoscaling
+// with it.
 func (c *Client) repairDead(ctx context.Context) {
 	slots, conns := c.deadSlots()
 	for i, tc := range slots {
@@ -165,91 +88,98 @@ func (c *Client) repairDead(ctx context.Context) {
 	}
 }
 
-// poolSaturated reports whether every usable conn is at the stream cap. A
-// closed conn is not usable capacity — repairDead deals with those — so it must
-// not make a saturated pool look like it still has room.
-func (c *Client) poolSaturated() (bool, int) {
+// poolLoad reports the live stream total over the conns that can actually carry
+// streams, how many such conns there are, and the pool size.
+//
+// A nil conn (mid-dial) or a closed one is not capacity — repairDead owns the
+// closed ones — so counting either would understate the mean and switch
+// scale-up off exactly when the pool is most loaded.
+func (c *Client) poolLoad() (streams, usable, total int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	saturated := true
 	for _, tc := range c.iter.Items {
 		if tc.conn == nil || tc.conn.IsClosed() {
 			continue
 		}
-		if tc.conn.NumStreams() < maxStreamsPerConn {
-			saturated = false
-			break
-		}
+		streams += tc.conn.NumStreams()
+		usable++
 	}
-	return saturated, len(c.iter.Items)
+	return streams, usable, len(c.iter.Items)
 }
 
-// scaleUp adds one conn when every existing conn is saturated. It returns the
-// number of slots that existed beforehand, whether or not it grew the pool.
-func (c *Client) scaleUp(ctx context.Context) int {
-	allOverloaded, numConns := c.poolSaturated()
-
-	if !allOverloaded || numConns >= c.maxConns {
-		return numConns
+// scaleUp adds one conn when the mean load per routable conn is above
+// streamsHigh.
+//
+// The predicate used to be universally quantified — every conn had to be at the
+// cap — so one conn a single stream short vetoed growth for the whole pool, and
+// each conn scale-up did add arrived with zero streams and vetoed the next tick
+// itself. With conn: 8 that needed ~512 concurrent streams before the pool grew
+// at all, which is why in practice it never did. A mean is a closed loop:
+// adding a conn lowers it because it added capacity.
+//
+// The dial happens outside c.mu. Holding the lock across a full pcap+KCP+smux
+// dial would block every new proxied connection for its duration, and it lands
+// exactly when the pool is already overloaded.
+func (c *Client) scaleUp() {
+	streams, usable, total := c.poolLoad()
+	if usable == 0 || streams <= usable*streamsHigh || total >= c.maxConns {
+		return
 	}
 
-	tc, err := newTimedConn(c.cfg) // dial outside the lock
+	tc, err := newTimedConn(c.cfg)
 	if err != nil {
 		flog.Errorf("autoscale: failed to create new connection: %v", err)
-		return numConns
+		return
 	}
-
-	// tc is still unpublished here, so reading its conn needs no lock.
-	conn := tc.conn
 
 	c.mu.Lock()
 	if len(c.iter.Items) >= c.maxConns {
 		// The pool grew while we were dialing — discard rather than overshoot.
 		c.mu.Unlock()
 		tc.close()
-		return numConns
+		return
 	}
 	c.iter.Items = append(c.iter.Items, tc)
-	total := len(c.iter.Items)
+	grown := len(c.iter.Items)
 	c.mu.Unlock()
 
-	c.bindTuner(tc, conn)
-
-	flog.Infof("autoscale: added connection (%d → %d), all had >%d streams",
-		numConns, total, maxStreamsPerConn)
-	return numConns
+	flog.Infof("autoscale: added connection (%d → %d), %d streams over %d conns",
+		total, grown, streams, usable)
 }
 
-// scaleDown retires at most one idle conn, considering only the first
-// `eligible` slots — see scaleConnections for why anything newer is off limits.
-func (c *Client) scaleDown(eligible int) {
-	c.mu.Lock()
-	numConns := len(c.iter.Items)
-	if eligible > numConns {
-		eligible = numConns // the pool shrank under us
-	}
-	if eligible <= c.minConns {
-		c.mu.Unlock()
+// scaleDown retires at most one idle conn when the mean load falls below
+// streamsLow.
+//
+// The victim must still carry zero streams. pick is join-shortest-queue, so a
+// conn holding even one stream is one a user is actively on; the pool therefore
+// drains as connections finish rather than on demand. That is deliberate — the
+// alternative is a drain state machine, and a slot marked for draining that
+// never empties is a conn nothing ever closes.
+func (c *Client) scaleDown() {
+	streams, usable, _ := c.poolLoad()
+	if usable <= c.minConns || streams >= usable*streamsLow {
 		return
 	}
 
-	// Retire at most one idle conn per cycle. The conn is snapshotted under the
-	// lock and closed outside it, and the slot is marked retired so an in-flight
-	// newConn caller holding a stale reference cannot redial it back to life.
+	// The conn is snapshotted under the lock and closed outside it: smux Close
+	// is bounded at 30s, then a KCP flush and a pcap handle close, and c.mu
+	// gates every new proxied connection. The slot is marked retired so an
+	// in-flight newConn caller holding a stale reference cannot redial it back
+	// to life.
 	//
 	// A closed conn also reports zero streams and so is eligible here. That is
 	// intended and keeps this consistent with pick, which deprioritises closed
 	// conns: both treat a dead conn as something to shed rather than to route
-	// traffic to. Retiring one only shrinks the pool above minConns, and
-	// scaleUp regrows it under load.
+	// traffic to.
 	var victim tnet.Conn
-	var stopTuner context.CancelFunc
-	for i := eligible - 1; i >= c.minConns; i-- {
+	c.mu.Lock()
+	before := len(c.iter.Items)
+	for i := before - 1; i >= 0; i-- {
 		tc := c.iter.Items[i]
 		if tc.conn != nil && tc.conn.NumStreams() == 0 {
-			victim, stopTuner = tc.conn, tc.stopTuner
-			tc.retired, tc.stopTuner = true, nil
+			victim = tc.conn
+			tc.retired = true
 			c.iter.Items = append(c.iter.Items[:i], c.iter.Items[i+1:]...)
 			break
 		}
@@ -260,12 +190,7 @@ func (c *Client) scaleDown(eligible int) {
 	if victim == nil {
 		return
 	}
-	// Stop the tuner before dropping the conn: nothing else holds a reference
-	// to it once the slot leaves the pool, so it would otherwise tune a closed
-	// session until process exit.
-	if stopTuner != nil {
-		stopTuner()
-	}
 	victim.Close()
-	flog.Infof("autoscale: removed idle connection (%d → %d)", numConns, total)
+	flog.Infof("autoscale: removed idle connection (%d → %d), %d streams over %d conns",
+		before, total, streams, usable)
 }

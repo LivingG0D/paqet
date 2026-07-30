@@ -9,44 +9,90 @@ import (
 	"paqet/internal/conf"
 )
 
-// TestScaleDownSkipsFreshConn is the regression guard for the autoscaler.
+// TestPoolLoadArmsOnMeanNotOnEveryConn is the regression guard for the
+// autoscaler's growth predicate.
 //
-// Splitting scaleConnections into scaleUp+scaleDown moved the numConns read to
-// after scaleUp's append, which put the just-added conn inside the scale-down
-// loop's range. A fresh conn has zero streams — exactly the victim predicate —
-// so every scale-up was undone by the scale-down in the same tick: the pool
-// could never grow, and under sustained load the client dialled and tore down a
-// full pcap+KCP+smux session every 30s forever.
+// The old predicate was universally quantified: EVERY conn had to be at the
+// stream cap before the pool grew. A single conn one stream short vetoed growth
+// for the whole pool — and since every conn scale-up added arrived with zero
+// streams, it vetoed the next tick itself. With conn: 8 that needed ~512
+// concurrent streams before the pool grew at all, so in practice it never did.
 //
-// scaleDown now only considers the slots that existed before scaleUp ran.
-// The pool must sit ABOVE minConns here, otherwise the eligible <= minConns
-// guard returns before the loop and the test would pass without ever
-// exercising the bound that actually fixes this.
+// The two subtests pin both directions of the mean.
+func TestPoolLoadArmsOnMeanNotOnEveryConn(t *testing.T) {
+	cfg := &conf.Conf{}
+
+	t.Run("one idle conn does not veto growth", func(t *testing.T) {
+		c := newTestClient(cfg)
+		c.iter.Items = append(c.iter.Items,
+			&timedConn{cfg: cfg, conn: &stubConn{streams: streamsHigh*2 + 1}},
+			&timedConn{cfg: cfg, conn: &stubConn{}}, // idle: the old veto
+		)
+
+		streams, usable, total := c.poolLoad()
+		if streams != streamsHigh*2+1 || usable != 2 || total != 2 {
+			t.Fatalf("poolLoad = (%d, %d, %d), want (%d, 2, 2)",
+				streams, usable, total, streamsHigh*2+1)
+		}
+		if streams <= usable*streamsHigh {
+			t.Errorf("mean %d/%d did not arm scale-up; an idle conn still vetoes growth",
+				streams, usable)
+		}
+	})
+
+	t.Run("a pool with room does not arm growth", func(t *testing.T) {
+		c := newTestClient(cfg)
+		c.iter.Items = append(c.iter.Items,
+			&timedConn{cfg: cfg, conn: &stubConn{streams: streamsHigh}},
+			&timedConn{cfg: cfg, conn: &stubConn{streams: 1}},
+		)
+
+		streams, usable, _ := c.poolLoad()
+		if streams > usable*streamsHigh {
+			t.Errorf("mean %d/%d armed scale-up while the pool still had room",
+				streams, usable)
+		}
+	})
+}
+
+// TestScaleDownSkipsFreshConn is the regression guard for the other half.
+//
+// Splitting scaleConnections into scaleUp+scaleDown once put the just-added
+// conn inside scale-down's victim range. A fresh conn has zero streams —
+// exactly the victim predicate — so every scale-up was undone by the scale-down
+// in the same tick: the pool could never grow, and under sustained load the
+// client dialled and tore down a full pcap+KCP+smux session every 30s forever.
+//
+// That used to need a positional bound threaded from scaleUp into scaleDown.
+// The streamsHigh:streamsLow hysteresis band now rules it out arithmetically —
+// a pool loaded enough to have grown cannot be idle enough to shrink — so this
+// asserts the property directly, with no plumbing left to pass.
 func TestScaleDownSkipsFreshConn(t *testing.T) {
 	cfg := &conf.Conf{}
 	c := newTestClient(cfg)
 	c.minConns, c.maxConns = 2, 8
 
-	fresh := &stubConn{}
-	saturated := []*stubConn{
-		{streams: maxStreamsPerConn},
-		{streams: maxStreamsPerConn},
-		{streams: maxStreamsPerConn},
+	// Three conns loaded just past the growth watermark: 99 > 3*32.
+	loaded := []*stubConn{
+		{streams: streamsHigh + 1},
+		{streams: streamsHigh + 1},
+		{streams: streamsHigh + 1},
 	}
-	for _, s := range saturated {
+	for _, s := range loaded {
 		c.iter.Items = append(c.iter.Items, &timedConn{cfg: cfg, conn: s})
 	}
+	// The conn scale-up just appended, still carrying nothing.
+	fresh := &stubConn{}
 	c.iter.Items = append(c.iter.Items, &timedConn{cfg: cfg, conn: fresh})
 
-	// 3 slots existed before the (simulated) scale-up appended the fourth.
-	c.scaleDown(3)
+	c.scaleDown()
 
 	if fresh.closed.Load() {
 		t.Error("scale-down retired the conn scale-up just added")
 	}
-	for i, s := range saturated {
+	for i, s := range loaded {
 		if s.closed.Load() {
-			t.Errorf("scale-down retired saturated conn %d", i)
+			t.Errorf("scale-down retired loaded conn %d", i)
 		}
 	}
 	if got := len(c.iter.Items); got != 4 {
@@ -66,6 +112,7 @@ func TestScaleDownClosesOutsideLock(t *testing.T) {
 	c := newTestClient(cfg)
 	c.minConns = 1
 
+	// 5 streams over 2 conns is under the drain watermark, so scale-down arms.
 	busy := &stubConn{streams: 5}
 	idle := &stubConn{
 		closeEntered: make(chan struct{}),
@@ -76,7 +123,7 @@ func TestScaleDownClosesOutsideLock(t *testing.T) {
 	idleTC := &timedConn{cfg: cfg, conn: idle}
 	c.iter.Items = append(c.iter.Items, &timedConn{cfg: cfg, conn: busy}, idleTC)
 
-	go c.scaleDown(2)
+	go c.scaleDown()
 
 	select {
 	case <-idle.closeEntered:
@@ -104,111 +151,6 @@ func TestScaleDownClosesOutsideLock(t *testing.T) {
 	}
 }
 
-// TestSwapTunerStopsPrevious covers the reconnect-orphan half of the tuner
-// lifecycle. AutoTuner captures its conn at construction and never rebinds, so
-// binding a tuner to a slot's new conn must stop the one bound to the old conn
-// — otherwise the orphan tunes a closed session every 10s until process exit
-// while the live conn is never tuned at all.
-func TestSwapTunerStopsPrevious(t *testing.T) {
-	c := newTestClient(&conf.Conf{})
-	conn := &stubConn{}
-	tc := &timedConn{cfg: c.cfg, conn: conn}
-
-	firstCtx, first := context.WithCancel(context.Background())
-	if !c.swapTuner(tc, conn, first) {
-		t.Fatal("swapTuner rejected the first binding")
-	}
-
-	secondCtx, second := context.WithCancel(context.Background())
-	defer second()
-	if !c.swapTuner(tc, conn, second) {
-		t.Fatal("swapTuner rejected the rebind")
-	}
-
-	select {
-	case <-firstCtx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("previous tuner was not stopped when a new conn was bound")
-	}
-	if secondCtx.Err() != nil {
-		t.Error("newly bound tuner was cancelled")
-	}
-}
-
-// TestSwapTunerRejectsStaleBinding covers the window between sampling a
-// (slot, conn) pair and binding its tuner. bindTuner callers release c.mu in
-// between, so the slot may have been retired by scaleDown or given a different
-// conn by redial. Accepting the binding anyway would either strand a tuner on a
-// slot nothing can cancel from, or cancel the live conn's tuner and leave a
-// zombie running against a closed session.
-func TestSwapTunerRejectsStaleBinding(t *testing.T) {
-	c := newTestClient(&conf.Conf{})
-
-	t.Run("conn replaced", func(t *testing.T) {
-		current := &stubConn{}
-		tc := &timedConn{cfg: c.cfg, conn: current}
-
-		liveCtx, live := context.WithCancel(context.Background())
-		defer live()
-		if !c.swapTuner(tc, current, live) {
-			t.Fatal("swapTuner rejected a current binding")
-		}
-
-		stale := &stubConn{} // the conn this binding was sampled for
-		_, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		if c.swapTuner(tc, stale, cancel) {
-			t.Error("swapTuner accepted a binding for a conn the slot no longer holds")
-		}
-		if liveCtx.Err() != nil {
-			t.Error("a stale binding cancelled the live conn's tuner")
-		}
-	})
-
-	t.Run("slot retired", func(t *testing.T) {
-		conn := &stubConn{}
-		tc := &timedConn{cfg: c.cfg, conn: conn, retired: true}
-
-		_, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		if c.swapTuner(tc, conn, cancel) {
-			t.Error("swapTuner accepted a binding for a retired slot")
-		}
-	})
-}
-
-// TestScaleDownStopsTuner covers the scale-down half. Once a slot leaves the
-// pool nothing else holds a reference to its tuner, so failing to cancel here
-// leaks the goroutine and pins the closed session graph out of GC — one per
-// scale cycle, on a daemon meant to run for weeks.
-func TestScaleDownStopsTuner(t *testing.T) {
-	cfg := &conf.Conf{}
-	c := newTestClient(cfg)
-	c.minConns = 1
-
-	tunerCtx, cancel := context.WithCancel(context.Background())
-	idleTC := &timedConn{cfg: cfg, conn: &stubConn{}, stopTuner: cancel}
-	c.iter.Items = append(c.iter.Items,
-		&timedConn{cfg: cfg, conn: &stubConn{streams: 5}},
-		idleTC,
-	)
-
-	c.scaleDown(2)
-
-	select {
-	case <-tunerCtx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("retired conn's auto-tuner was not stopped")
-	}
-
-	c.mu.Lock()
-	got := idleTC.stopTuner
-	c.mu.Unlock()
-	if got != nil {
-		t.Error("stopTuner was not cleared when the slot was retired")
-	}
-}
-
 // TestScaleDownKeepsMinConns checks the floor is respected: with the pool
 // already at minConns, an idle conn must not be retired.
 func TestScaleDownKeepsMinConns(t *testing.T) {
@@ -222,7 +164,7 @@ func TestScaleDownKeepsMinConns(t *testing.T) {
 		&timedConn{cfg: cfg, conn: b},
 	)
 
-	c.scaleDown(2)
+	c.scaleDown()
 
 	if a.closed.Load() || b.closed.Load() {
 		t.Error("scale-down dropped below minConns")
@@ -232,44 +174,35 @@ func TestScaleDownKeepsMinConns(t *testing.T) {
 	}
 }
 
-// TestPoolSaturatedIgnoresDeadConn covers half of a recovery hole introduced
-// when pick started routing around closed conns. A closed session reports zero
-// streams, so a dead slot used to look like spare capacity and held
-// allOverloaded false forever — which switched scale-up off entirely, no matter
-// how saturated the surviving conns were.
-func TestPoolSaturatedIgnoresDeadConn(t *testing.T) {
+// TestPoolLoadIgnoresDeadConn covers half of a recovery hole introduced when
+// pick started routing around closed conns. A closed session reports zero
+// streams, so a dead slot used to look like spare capacity — it dragged the
+// pool mean down and switched scale-up off entirely, no matter how loaded the
+// surviving conns were.
+func TestPoolLoadIgnoresDeadConn(t *testing.T) {
 	cfg := &conf.Conf{}
 	c := newTestClient(cfg)
 
 	dead := &stubConn{}
 	dead.Close()
 	c.iter.Items = append(c.iter.Items,
-		&timedConn{cfg: cfg, conn: &stubConn{streams: maxStreamsPerConn}},
-		&timedConn{cfg: cfg, conn: &stubConn{streams: maxStreamsPerConn}},
+		&timedConn{cfg: cfg, conn: &stubConn{streams: streamsHigh * 2}},
+		&timedConn{cfg: cfg, conn: &stubConn{streams: streamsHigh * 2}},
 		&timedConn{cfg: cfg, conn: dead},
 	)
 
-	saturated, n := c.poolSaturated()
-	if !saturated {
-		t.Error("a dead conn counted as spare capacity, so scale-up can never fire")
+	streams, usable, total := c.poolLoad()
+	if usable != 2 {
+		t.Errorf("usable conns = %d, want 2: a dead conn is not capacity", usable)
 	}
-	if n != 3 {
-		t.Errorf("pool size = %d, want 3", n)
+	if streams != streamsHigh*4 {
+		t.Errorf("streams = %d, want %d", streams, streamsHigh*4)
 	}
-}
-
-// TestPoolSaturatedSeesRealCapacity is the converse: a live conn with room must
-// still prevent scale-up.
-func TestPoolSaturatedSeesRealCapacity(t *testing.T) {
-	cfg := &conf.Conf{}
-	c := newTestClient(cfg)
-	c.iter.Items = append(c.iter.Items,
-		&timedConn{cfg: cfg, conn: &stubConn{streams: maxStreamsPerConn}},
-		&timedConn{cfg: cfg, conn: &stubConn{streams: 1}},
-	)
-
-	if saturated, _ := c.poolSaturated(); saturated {
-		t.Error("pool reported saturated while a live conn still had room")
+	if total != 3 {
+		t.Errorf("pool size = %d, want 3", total)
+	}
+	if streams <= usable*streamsHigh {
+		t.Error("a dead conn diluted the mean, so scale-up can never fire")
 	}
 }
 

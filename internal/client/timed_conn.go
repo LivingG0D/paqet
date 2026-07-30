@@ -1,7 +1,6 @@
 package client
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -21,12 +20,10 @@ type timedConn struct {
 	// dialMu serialises redials of this slot. Held across the dial, so it must
 	// never be taken while holding Client.mu (see Client.redial).
 	dialMu sync.Mutex
-	// conn, retired and stopTuner are guarded by Client.mu. retired marks a slot
-	// that scaleDown has removed from the pool, so a redial cannot revive it.
-	// stopTuner cancels the auto-tuner bound to the current conn.
-	conn      tnet.Conn
-	retired   bool
-	stopTuner context.CancelFunc
+	// conn and retired are guarded by Client.mu. retired marks a slot that
+	// scaleDown has removed from the pool, so a redial cannot revive it.
+	conn    tnet.Conn
+	retired bool
 }
 
 func newTimedConn(cfg *conf.Conf) (*timedConn, error) {

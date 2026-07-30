@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-paqet is a bidirectional, packet-level proxy that tunnels **KCP over raw TCP packets** crafted with **libpcap**, bypassing the kernel TCP stack to evade DPI/firewalls. This repo (`LivingG0D/paqet`) is a fork of `hanselime/paqet` with added DPI-evasion tuning, an installer/control-panel, and KCP autotuning.
+paqet is a bidirectional, packet-level proxy that tunnels **KCP over raw TCP packets** crafted with **libpcap**, bypassing the kernel TCP stack to evade DPI/firewalls. This repo (`LivingG0D/paqet`) is a fork of `hanselime/paqet` with added DPI-evasion tuning, an installer/control-panel, and load-driven connection autoscaling.
 
 ## Build / Test / Run
 
@@ -46,11 +46,11 @@ sudo iptables -t mangle -A OUTPUT     -p tcp --sport <port> --tcp-flags RST RST 
 A connection is assembled bottom-up; understanding paqet means following this layering across packages:
 
 1. **`internal/socket`** — `PacketConn` (implements `net.PacketConn`) backed by pcap. `send_handle.go` crafts raw TCP frames (randomized MSS/TTL/window/timestamps for fingerprint evasion); `recv_handle.go` reads them via a BPF filter (`tcp and dst port N`) using a zero-alloc `DecodingLayerParser`. This is the disguised "wire."
-2. **`internal/tnet/kcp`** — wraps `PacketConn` in KCP (`xtaci/kcp-go`, with encryption `cfg.Block` + optional FEC `dshard`/`pshard`), then layers `smux` stream multiplexing on top. `dial.go` = client side, `listen.go` = server side, `kcp.go` = per-mode KCP tuning (`aplConf`) + smux config (`smuxConf`), `autotune.go` = adaptive window sizing.
+2. **`internal/tnet/kcp`** — wraps `PacketConn` in KCP (`xtaci/kcp-go`, with encryption `cfg.Block` + optional FEC `dshard`/`pshard`), then layers `smux` stream multiplexing on top. `dial.go` = client side, `listen.go` = server side, `kcp.go` = per-mode KCP tuning (`aplConf`) + smux config (`smuxConf`). Window sizes are set once per session from config — there is deliberately no runtime window controller (see `ticker.go`).
 3. **`internal/tnet`** — transport-agnostic abstractions: `Conn`, `Listener`, `Addr`, `strm`.
 4. **`internal/protocol`** — per-smux-stream framing: a type byte (`PPING`/`PPONG`/`PTCPF`/`PTCP`/`PUDP`) + target `Addr` + TCP-flag config. This is how each stream declares what it carries.
 5. **`internal/server`** — accepts smux streams, reads the protocol header, dials the real target (`tcp.go`/`udp.go` via `DialContext`), and pipes bytes. `ping.go` answers `PPING`.
-6. **`internal/client`** — opens smux streams, writes the protocol header, bridges ingress traffic. `timed_conn.go` owns the `PacketConn`+KCP dial lifecycle and reconnection (`ticker.go`); `udp_pool.go` pools UDP sessions.
+6. **`internal/client`** — opens smux streams, writes the protocol header, bridges ingress traffic. `timed_conn.go` owns the `PacketConn`+KCP dial lifecycle and reconnection; `ticker.go` autoscales the pool every 30s off the *mean* live stream count per conn (one proxied connection = one stream, so this tracks concurrent users) between `transport.conn` and `2×transport.conn`; `udp_pool.go` pools UDP sessions.
 7. **Ingress (client side):** `internal/socks` (SOCKS5 server, dynamic forwarding) and/or `internal/forward` (static port forwarding). Both feed into the client streams above.
 
 `cmd/run` is the entry: `conf.LoadFromFile` → `setDefaults`/`validate` → branch on `cfg.Role` (`client`|`server`). Other subcommands: `secret` (keygen), `iface` (list NICs), `ping` (connectivity test), `dump` (pcap debug), `version`.

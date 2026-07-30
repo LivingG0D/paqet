@@ -140,10 +140,6 @@ func (c *Client) redial(ctx context.Context, tc *timedConn, stale tnet.Conn) (tn
 		return nil, errSlotRetired
 	}
 
-	// Rebind the auto-tuner: it captured the conn we just replaced, so without
-	// this the old tuner would keep tuning a closed session and the new conn
-	// would never be tuned at all.
-	c.bindTuner(tc, conn)
 	return conn, nil
 }
 
