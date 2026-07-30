@@ -112,15 +112,33 @@ func (c *Client) redial(ctx context.Context, tc *timedConn, stale tnet.Conn) (tn
 		return nil, err
 	}
 
-	c.mu.Lock()
-	tc.conn = conn
-	c.mu.Unlock()
+	if !c.publish(tc, conn) {
+		// Retired while we were dialing. The check above cannot cover this:
+		// createConn takes long enough for a scale-down tick to land, and a slot
+		// whose conn is closed reports zero streams — exactly what scaleDown
+		// looks for. Publishing now would strand this conn outside the pool
+		// where nothing closes it, with a tuner nothing cancels.
+		conn.Close()
+		return nil, errSlotRetired
+	}
 
 	// Rebind the auto-tuner: it captured the conn we just replaced, so without
 	// this the old tuner would keep tuning a closed session and the new conn
 	// would never be tuned at all.
 	c.bindTuner(tc, conn)
 	return conn, nil
+}
+
+// publish installs conn as tc's conn, reporting false if the slot was retired
+// meanwhile — in which case the conn belongs to no one and the caller closes it.
+func (c *Client) publish(tc *timedConn, conn tnet.Conn) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if tc.retired {
+		return false
+	}
+	tc.conn = conn
+	return true
 }
 
 func (c *Client) newStrm(ctx context.Context) (tnet.Strm, error) {

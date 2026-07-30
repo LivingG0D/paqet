@@ -99,6 +99,50 @@ func TestPickEmptyPool(t *testing.T) {
 	}
 }
 
+// TestPublishRejectsRetiredSlot pins the invariant that closes a TOCTOU window
+// in redial: the retired check happens before createConn, but a dial takes long
+// enough for a scale-down tick to land — and a slot mid-redial holds a closed
+// conn, which reports zero streams and is therefore exactly what scaleDown
+// picks. Publishing into a retired slot strands the conn outside the pool where
+// nothing closes it, with a tuner nothing cancels.
+func TestPublishRejectsRetiredSlot(t *testing.T) {
+	cfg := &conf.Conf{}
+	c := newTestClient(cfg)
+
+	old := &stubConn{}
+	tc := &timedConn{cfg: cfg, conn: old, retired: true}
+
+	if c.publish(tc, &stubConn{}) {
+		t.Fatal("publish accepted a conn into a retired slot")
+	}
+
+	c.mu.Lock()
+	got := tc.conn
+	c.mu.Unlock()
+	if got != old {
+		t.Error("publish overwrote the conn of a retired slot")
+	}
+}
+
+func TestPublishInstallsConn(t *testing.T) {
+	cfg := &conf.Conf{}
+	c := newTestClient(cfg)
+
+	tc := &timedConn{cfg: cfg}
+	fresh := &stubConn{}
+
+	if !c.publish(tc, fresh) {
+		t.Fatal("publish rejected a conn for a live slot")
+	}
+
+	c.mu.Lock()
+	got := tc.conn
+	c.mu.Unlock()
+	if got != fresh {
+		t.Error("publish did not install the conn")
+	}
+}
+
 // TestNewConnNilConnSlot covers a slot whose dial never completed. The old code
 // dereferenced bestTC.conn unconditionally, so reaching this path through the
 // round-robin fallback panicked.
