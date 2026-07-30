@@ -10,7 +10,10 @@ import (
 	"paqet/internal/tnet"
 )
 
-var errNoConns = errors.New("client: no connections available")
+var (
+	errNoConns     = errors.New("client: no connections available")
+	errSlotRetired = errors.New("client: connection slot retired")
+)
 
 // pick returns the least-loaded slot along with a snapshot of its conn. c.mu is
 // held only for the scan; the caller health-checks and redials outside it.
@@ -82,8 +85,13 @@ func (c *Client) redial(ctx context.Context, tc *timedConn, stale tnet.Conn) (tn
 	defer tc.dialMu.Unlock()
 
 	c.mu.Lock()
-	cur := tc.conn
+	cur, retired := tc.conn, tc.retired
 	c.mu.Unlock()
+	if retired {
+		// scaleDown dropped this slot while we waited; redialing it would leak
+		// a conn nothing owns. Let the caller retry against a live slot.
+		return nil, errSlotRetired
+	}
 	if cur != nil && cur != stale {
 		return cur, nil
 	}

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"paqet/internal/flog"
+	"paqet/internal/tnet"
 	"paqet/internal/tnet/kcp"
 	"time"
 )
@@ -49,14 +50,20 @@ func (c *Client) startAutoTuners(ctx context.Context) {
 	}
 }
 
-// scaleConnections checks stream counts and spawns/drains connections.
+// scaleConnections grows or drains the pool by at most one conn per tick.
+//
+// Like newConn, it keeps dials and teardowns outside c.mu: holding the lock
+// across either would block every new proxied connection for the duration,
+// which on the scale-up path is a full pcap+KCP+smux dial and lands exactly
+// when the pool is already saturated.
 func (c *Client) scaleConnections(ctx context.Context) {
+	c.scaleUp(ctx)
+	c.scaleDown()
+}
+
+func (c *Client) scaleUp(ctx context.Context) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	numConns := len(c.iter.Items)
-
-	// Check if all connections are overloaded
 	allOverloaded := true
 	for _, tc := range c.iter.Items {
 		if tc.conn != nil && tc.conn.NumStreams() < maxStreamsPerConn {
@@ -64,41 +71,69 @@ func (c *Client) scaleConnections(ctx context.Context) {
 			break
 		}
 	}
+	c.mu.Unlock()
 
-	// Scale up: all connections overloaded and below max
-	if allOverloaded && numConns < c.maxConns {
-		tc, err := newTimedConn(c.cfg)
-		if err != nil {
-			flog.Errorf("autoscale: failed to create new connection: %v", err)
-			return
-		}
-		c.iter.Items = append(c.iter.Items, tc)
-
-		// Start auto-tuner for new connection
-		if kcpConn, ok := tc.conn.(*kcp.Conn); ok {
-			at := kcp.NewAutoTuner(
-				kcpConn,
-				c.cfg.Transport.KCP.Sndwnd,
-				c.cfg.Transport.KCP.Rcvwnd,
-			)
-			go at.Run(ctx)
-		}
-
-		flog.Infof("autoscale: added connection (%d → %d), all had >%d streams",
-			numConns, len(c.iter.Items), maxStreamsPerConn)
+	if !allOverloaded || numConns >= c.maxConns {
+		return
 	}
 
-	// Scale down: find idle connections beyond minimum
-	if numConns > c.minConns {
-		for i := numConns - 1; i >= c.minConns; i-- {
-			tc := c.iter.Items[i]
-			if tc.conn != nil && tc.conn.NumStreams() == 0 {
-				tc.close()
-				c.iter.Items = append(c.iter.Items[:i], c.iter.Items[i+1:]...)
-				flog.Infof("autoscale: removed idle connection (%d → %d)",
-					numConns, len(c.iter.Items))
-				break // Remove at most one per cycle
-			}
+	tc, err := newTimedConn(c.cfg) // dial outside the lock
+	if err != nil {
+		flog.Errorf("autoscale: failed to create new connection: %v", err)
+		return
+	}
+
+	c.mu.Lock()
+	if len(c.iter.Items) >= c.maxConns {
+		// The pool grew while we were dialing — discard rather than overshoot.
+		c.mu.Unlock()
+		tc.close()
+		return
+	}
+	c.iter.Items = append(c.iter.Items, tc)
+	total := len(c.iter.Items)
+	c.mu.Unlock()
+
+	// Start auto-tuner for new connection
+	if kcpConn, ok := tc.conn.(*kcp.Conn); ok {
+		at := kcp.NewAutoTuner(
+			kcpConn,
+			c.cfg.Transport.KCP.Sndwnd,
+			c.cfg.Transport.KCP.Rcvwnd,
+		)
+		go at.Run(ctx)
+	}
+
+	flog.Infof("autoscale: added connection (%d → %d), all had >%d streams",
+		numConns, total, maxStreamsPerConn)
+}
+
+func (c *Client) scaleDown() {
+	c.mu.Lock()
+	numConns := len(c.iter.Items)
+	if numConns <= c.minConns {
+		c.mu.Unlock()
+		return
+	}
+
+	// Retire at most one idle conn per cycle. The conn is snapshotted under the
+	// lock and closed outside it, and the slot is marked retired so an in-flight
+	// newConn caller holding a stale reference cannot redial it back to life.
+	var victim tnet.Conn
+	for i := numConns - 1; i >= c.minConns; i-- {
+		tc := c.iter.Items[i]
+		if tc.conn != nil && tc.conn.NumStreams() == 0 {
+			victim, tc.retired = tc.conn, true
+			c.iter.Items = append(c.iter.Items[:i], c.iter.Items[i+1:]...)
+			break
 		}
 	}
+	total := len(c.iter.Items)
+	c.mu.Unlock()
+
+	if victim == nil {
+		return
+	}
+	victim.Close()
+	flog.Infof("autoscale: removed idle connection (%d → %d)", numConns, total)
 }

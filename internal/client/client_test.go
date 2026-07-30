@@ -23,6 +23,10 @@ type stubConn struct {
 	pingOnce    sync.Once
 	pingEntered chan struct{} // closed on first Ping, if non-nil
 	pingBlock   chan struct{} // Ping blocks until this closes, if non-nil
+
+	closeOnce    sync.Once
+	closeEntered chan struct{} // closed on first Close, if non-nil
+	closeBlock   chan struct{} // Close blocks until this closes, if non-nil
 }
 
 // errNoStrm keeps the stub honest: a real Conn never returns a nil Strm with a
@@ -41,7 +45,16 @@ func (s *stubConn) Ping(bool) error {
 	}
 	return nil
 }
-func (s *stubConn) Close() error                     { s.closed.Store(true); return nil }
+func (s *stubConn) Close() error {
+	s.closed.Store(true)
+	if s.closeEntered != nil {
+		s.closeOnce.Do(func() { close(s.closeEntered) })
+	}
+	if s.closeBlock != nil {
+		<-s.closeBlock
+	}
+	return nil
+}
 func (s *stubConn) LocalAddr() net.Addr              { return nil }
 func (s *stubConn) RemoteAddr() net.Addr             { return nil }
 func (s *stubConn) SetDeadline(time.Time) error      { return nil }
