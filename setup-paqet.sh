@@ -330,16 +330,31 @@ else
     read -r -p "MTU Size (default 1250, lower if unstable): " KCP_MTU < /dev/tty
     KCP_MTU=${KCP_MTU:-1250}
 
-    # Buffers/windows: measured fastest on a 37ms 1Gbit path (25 -> 320 Mbit/s).
-    # These are a throughput ceiling — one stream cannot exceed streambuf/RTT,
-    # one conn cannot exceed smuxbuf/RTT — so small values cap a fast link hard.
-    # They are also the knob that caused the alpha.32 regression (9d5c72c): at
-    # 432 concurrent streams, smuxbuf 4MB pushed KCP loss from 8% to 24%, because
-    # smux admits more in-flight data than the path can carry. That was measured
-    # with FEW streams, so if you serve hundreds of concurrent users and see
-    # retrans climb, drop these back toward smuxbuf 524288 / streambuf 65536.
-    KCP_SNDWND=${KCP_SNDWND:-4096}
-    KCP_RCVWND=${KCP_RCVWND:-4096}
+    # sndwnd/rcvwnd tune for CONCURRENCY, not for one big download. The window is
+    # per-conn but the path is shared, so `conn` multiplies what is in flight:
+    # 8 conns x 4096 segs x 1206B is ~40MB against a ~1.2MB BDP (250 Mbit/s,
+    # 37ms) — a 33x overshoot, and the same over-admission that caused the
+    # alpha.32 regression (9d5c72c: loss 8% -> 24%).
+    #
+    # Measured over a 37ms Iran<->TR path, 64 concurrent streams, interleaved
+    # runs (aggregate / single-stream / server-side retrans):
+    #   sndwnd 4096 -> 230 Mbit/s (unstable, 207-249) / 123 Mbit/s / 38-42%
+    #   sndwnd 2048 -> 244 Mbit/s                     /   -        / 30-37%
+    #   sndwnd 1024 -> 258 Mbit/s (stable,  257-260)  /  89 Mbit/s / 26-30%
+    #   sndwnd  512 -> 260 Mbit/s                     /  59 Mbit/s / 11.6%
+    # 1024 is the many-user default: +12.5% aggregate, ~10x more consistent, and
+    # ~100MB less server RSS, paid for with 28% of single-stream throughput.
+    # Serving few users who each pull large files? Raise toward 4096. Seeing high
+    # retrans on a lossy path? Drop to 512 — aggregate holds, only single-stream
+    # falls. (Measured on a 1-vCPU server that saturated at ~260 Mbit/s; on a
+    # bigger box the whole curve shifts up.)
+    #
+    # smuxbuf/streambuf are a throughput CEILING — one stream cannot exceed
+    # streambuf/RTT, one conn cannot exceed smuxbuf/RTT. Measurement showed
+    # streambuf 512KB/1MB/4MB within noise of each other once sndwnd is right,
+    # so 4MB stays: it costs nothing and lifts the per-stream ceiling.
+    KCP_SNDWND=${KCP_SNDWND:-1024}
+    KCP_RCVWND=${KCP_RCVWND:-1024}
     KCP_SMUXBUF=${KCP_SMUXBUF:-16777216}
     KCP_STREAMBUF=${KCP_STREAMBUF:-4194304}
 
