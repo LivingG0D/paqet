@@ -83,6 +83,55 @@ func TestPickChoosesLeastLoaded(t *testing.T) {
 	}
 }
 
+// TestPickPrefersLiveConn is the regression guard for connection starvation.
+//
+// smux reports NumStreams() == 0 for a closed session (session.go:324-327), so
+// ranking purely by load made a dead conn out-rank every healthy one. It then
+// failed Ping, redialed, and — if the redial kept failing — stayed dead and won
+// the next scan too. With the installer's default of 8 conns, one un-redialable
+// slot could absorb every stream request while seven healthy conns sat idle,
+// and concurrent callers serialised on that slot's dialMu each doing their own
+// failing dial.
+func TestPickPrefersLiveConn(t *testing.T) {
+	cfg := &conf.Conf{}
+	c := newTestClient(cfg)
+
+	dead := &stubConn{streams: 40}
+	dead.Close() // now reports IsClosed, and NumStreams() == 0
+	live := &stubConn{streams: 40}
+
+	c.iter.Items = append(c.iter.Items,
+		&timedConn{cfg: cfg, conn: dead},
+		&timedConn{cfg: cfg, conn: live},
+	)
+
+	_, conn := c.pick()
+	if conn != live {
+		t.Error("pick chose a closed conn over a live one — a dead slot reports zero streams and would starve the pool")
+	}
+}
+
+// TestPickFallsBackToDeadConn: when nothing is live, a dead slot must still be
+// handed back so redial can revive it. Returning nothing would strand the
+// client with no way to recover.
+func TestPickFallsBackToDeadConn(t *testing.T) {
+	cfg := &conf.Conf{}
+	c := newTestClient(cfg)
+
+	a, b := &stubConn{}, &stubConn{}
+	a.Close()
+	b.Close()
+	c.iter.Items = append(c.iter.Items,
+		&timedConn{cfg: cfg, conn: a},
+		&timedConn{cfg: cfg, conn: b},
+	)
+
+	tc, conn := c.pick()
+	if tc == nil || conn == nil {
+		t.Fatal("pick gave up when every conn was dead; nothing would ever redial")
+	}
+}
+
 // TestPickEmptyPool guards the fallback path. pick's round-robin fallback runs
 // only when every slot is empty, and iterator.Next indexes Items directly — so
 // an empty pool must be rejected before it is reached rather than panicking.

@@ -185,6 +185,12 @@ func (c *Client) scaleDown(eligible int) {
 	// Retire at most one idle conn per cycle. The conn is snapshotted under the
 	// lock and closed outside it, and the slot is marked retired so an in-flight
 	// newConn caller holding a stale reference cannot redial it back to life.
+	//
+	// A closed conn also reports zero streams and so is eligible here. That is
+	// intended and keeps this consistent with pick, which deprioritises closed
+	// conns: both treat a dead conn as something to shed rather than to route
+	// traffic to. Retiring one only shrinks the pool above minConns, and
+	// scaleUp regrows it under load.
 	var victim tnet.Conn
 	var stopTuner context.CancelFunc
 	for i := eligible - 1; i >= c.minConns; i-- {

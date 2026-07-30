@@ -36,7 +36,13 @@ var errNoStrm = errors.New("stubConn: streams not supported")
 
 func (s *stubConn) OpenStrm() (tnet.Strm, error)   { return nil, errNoStrm }
 func (s *stubConn) AcceptStrm() (tnet.Strm, error) { return nil, errNoStrm }
-func (s *stubConn) NumStreams() int                { return s.streams }
+func (s *stubConn) NumStreams() int {
+	if s.closed.Load() {
+		return 0 // mirrors smux: a closed session reports zero streams
+	}
+	return s.streams
+}
+func (s *stubConn) IsClosed() bool { return s.closed.Load() }
 func (s *stubConn) Ping(bool) error {
 	if s.pingEntered != nil {
 		s.pingOnce.Do(func() { close(s.pingEntered) })

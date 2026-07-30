@@ -21,10 +21,19 @@ func (c *Client) pick() (*timedConn, tnet.Conn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var best *timedConn
+	var best, dead *timedConn
 	bestStreams := int(^uint(0) >> 1) // max int
 	for _, tc := range c.iter.Items {
 		if tc.conn == nil {
+			continue
+		}
+		if tc.conn.IsClosed() {
+			// A closed session reports zero streams, so ranking it by load alone
+			// would make it out-rank every healthy conn and absorb all traffic,
+			// while its redial keeps failing. Keep it only as a last resort.
+			if dead == nil {
+				dead = tc
+			}
 			continue
 		}
 		if n := tc.conn.NumStreams(); n < bestStreams {
@@ -32,6 +41,12 @@ func (c *Client) pick() (*timedConn, tnet.Conn) {
 		}
 	}
 
+	if best == nil {
+		// Nothing live: hand back a dead slot so it gets redialed rather than
+		// failing outright. redial serialises on the slot, and callers that lose
+		// that race reuse the winner's conn.
+		best = dead
+	}
 	if best == nil {
 		if len(c.iter.Items) == 0 {
 			return nil, nil
