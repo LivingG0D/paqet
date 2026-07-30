@@ -330,6 +330,19 @@ else
     read -r -p "MTU Size (default 1250, lower if unstable): " KCP_MTU < /dev/tty
     KCP_MTU=${KCP_MTU:-1250}
 
+    # Buffers/windows: measured fastest on a 37ms 1Gbit path (25 -> 320 Mbit/s).
+    # These are a throughput ceiling — one stream cannot exceed streambuf/RTT,
+    # one conn cannot exceed smuxbuf/RTT — so small values cap a fast link hard.
+    # They are also the knob that caused the alpha.32 regression (9d5c72c): at
+    # 432 concurrent streams, smuxbuf 4MB pushed KCP loss from 8% to 24%, because
+    # smux admits more in-flight data than the path can carry. That was measured
+    # with FEW streams, so if you serve hundreds of concurrent users and see
+    # retrans climb, drop these back toward smuxbuf 524288 / streambuf 65536.
+    KCP_SNDWND=${KCP_SNDWND:-4096}
+    KCP_RCVWND=${KCP_RCVWND:-4096}
+    KCP_SMUXBUF=${KCP_SMUXBUF:-16777216}
+    KCP_STREAMBUF=${KCP_STREAMBUF:-4194304}
+
     # Encryption Selection
     echo -e "\n${BLUE}Encryption${NC}"
     echo "Choose encryption for KCP packets (MUST match on both sides):"
@@ -400,6 +413,10 @@ transport:
     mtu: $KCP_MTU
     key: "$CFG_KEY"
     block: "$KCP_BLOCK"
+    sndwnd: $KCP_SNDWND
+    rcvwnd: $KCP_RCVWND
+    smuxbuf: $KCP_SMUXBUF
+    streambuf: $KCP_STREAMBUF
     dshard: $KCP_DSHARD
     pshard: $KCP_PSHARD
 EOF
@@ -481,6 +498,10 @@ transport:
     mtu: $KCP_MTU
     key: "$CFG_KEY"
     block: "$KCP_BLOCK"
+    sndwnd: $KCP_SNDWND
+    rcvwnd: $KCP_RCVWND
+    smuxbuf: $KCP_SMUXBUF
+    streambuf: $KCP_STREAMBUF
     dshard: $KCP_DSHARD
     pshard: $KCP_PSHARD
 EOF
