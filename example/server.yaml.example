@@ -91,9 +91,17 @@ transport:
     # block: "aes"                    # Encryption: aes, aes-128, aes-128-gcm, aes-192, salsa20, blowfish, twofish, cast5, 3des, tea, xtea, xor, sm4, none, null.
     key: "your-secret-key-here"       # CHANGE ME: Secret key (must match client)
 
-    # Buffer settings (optional)
-    # smuxbuf: 2097152       # 2MB SMUX buffer
-    # streambuf: 1048576     # 1MB stream buffer
+    # Buffer settings (optional). These are a throughput ceiling on any link
+    # with latency: a single stream cannot exceed streambuf/RTT, and one
+    # connection cannot exceed smuxbuf/RTT, no matter how fast the path is.
+    # The defaults are deliberately small to bound memory when many streams
+    # are active — at 37ms RTT they work out to roughly:
+    #     streambuf  64KB (default) -> ~14 Mbit/s per stream
+    #     smuxbuf   512KB (default) -> ~110 Mbit/s per connection
+    # Raise both for a fast link carrying few streams; leave them alone when
+    # serving many concurrent users, which is what they are tuned for.
+    # smuxbuf: 16777216      # 16MB
+    # streambuf: 4194304     # 4MB
 
     # smuxkalive: 30      # SMUX keepalive interval (seconds, default 30)
     # smuxktimeout: 90    # SMUX keepalive timeout (seconds, default 90)

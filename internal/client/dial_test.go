@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"paqet/internal/conf"
+	"paqet/internal/tnet"
 )
 
 // lockFree reports whether c.mu can be acquired within d.
@@ -25,36 +26,77 @@ func lockFree(c *Client, d time.Duration) bool {
 	}
 }
 
-// TestNewConnDoesNotHoldLockDuringPing is the regression guard for the
-// head-of-line blocking defect: newConn used to hold c.mu across the health
-// check, so a single unresponsive conn froze every other caller — and c.mu
-// gates all new proxied connections plus the stats reporter, the autoscaler
-// and shutdown.
+// TestNewConnDoesNoIO guards the per-connection fast path. newConn runs once
+// per proxied connection, and it used to do two smux stream round-trips there:
+// a Ping(false) liveness probe and a re-send of the static TCPF config. Each
+// cost a SYN+FIN control-frame pair on the wire, plus a server-side stream that
+// read EOF and logged an error — three streams per connection where one does.
 //
-// smux bounds OpenStream and Close at openCloseTimeout (30s), so a real stall
-// here held the lock for up to a minute. Ping is stubbed to block forever;
-// c.mu must still be acquirable.
-func TestNewConnDoesNotHoldLockDuringPing(t *testing.T) {
+// The stub parks forever in Ping, so if a liveness probe ever returns to this
+// path the test fails instead of silently costing a round-trip per connection.
+func TestNewConnDoesNoIO(t *testing.T) {
 	cfg := &conf.Conf{}
 	c := newTestClient(cfg)
 
-	blocking := &stubConn{
+	live := &stubConn{
 		pingEntered: make(chan struct{}),
-		pingBlock:   make(chan struct{}),
+		pingBlock:   make(chan struct{}), // never closed: Ping would park here
 	}
-	defer close(blocking.pingBlock)
-	c.iter.Items = append(c.iter.Items, &timedConn{cfg: cfg, conn: blocking})
+	c.iter.Items = append(c.iter.Items, &timedConn{cfg: cfg, conn: live})
 
-	go c.newConn(context.Background()) //nolint:errcheck // parks in Ping by design
+	done := make(chan tnet.Conn, 1)
+	go func() {
+		_, conn, err := c.newConn(context.Background())
+		if err != nil {
+			t.Errorf("newConn: %v", err)
+		}
+		done <- conn
+	}()
 
 	select {
-	case <-blocking.pingEntered:
+	case got := <-done:
+		if got != live {
+			t.Errorf("newConn returned %v, want the live conn", got)
+		}
+	case <-live.pingEntered:
+		t.Fatal("newConn called Ping — a smux stream round-trip per proxied connection")
 	case <-time.After(2 * time.Second):
-		t.Fatal("Ping was never called")
+		t.Fatal("newConn blocked; it must not do I/O on the per-connection path")
 	}
 
 	if !lockFree(c, 2*time.Second) {
-		t.Fatal("c.mu is held while Ping blocks — newConn serialises the whole client")
+		t.Fatal("c.mu left held by newConn")
+	}
+}
+
+// TestRedialClosesStaleOutsideLock keeps the lock-scope guarantee pinned now
+// that the blocking work on this path is the redial, not the health check.
+// smux bounds Close at openCloseTimeout (30s), and c.mu gates every new proxied
+// connection plus the stats reporter, the autoscaler and shutdown, so holding
+// it across a teardown would serialise the whole client.
+func TestRedialClosesStaleOutsideLock(t *testing.T) {
+	cfg := &conf.Conf{}
+	c := newTestClient(cfg)
+
+	// closeBlock is deliberately never closed: the goroutine parks inside Close,
+	// so redial never reaches the real dial in createConn.
+	stale := &stubConn{
+		closeEntered: make(chan struct{}),
+		closeBlock:   make(chan struct{}),
+	}
+	tc := &timedConn{cfg: cfg, conn: stale}
+	c.iter.Items = append(c.iter.Items, tc)
+
+	go c.redial(context.Background(), tc, stale) //nolint:errcheck // parks in Close by design
+
+	select {
+	case <-stale.closeEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("redial never closed the stale conn")
+	}
+
+	if !lockFree(c, 2*time.Second) {
+		t.Fatal("c.mu is held while the stale conn's Close blocks")
 	}
 }
 
@@ -143,7 +185,7 @@ func TestPickEmptyPool(t *testing.T) {
 		t.Fatalf("pick on empty pool = (%v, %v), want (nil, nil)", tc, conn)
 	}
 
-	if _, err := c.newConn(context.Background()); !errors.Is(err, errNoConns) {
+	if _, _, err := c.newConn(context.Background()); !errors.Is(err, errNoConns) {
 		t.Fatalf("newConn on empty pool = %v, want errNoConns", err)
 	}
 }
@@ -204,7 +246,7 @@ func TestNewConnNilConnSlot(t *testing.T) {
 	// than panicking, and does not leave c.mu held.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := c.newConn(ctx); err == nil {
+	if _, _, err := c.newConn(ctx); err == nil {
 		t.Fatal("newConn with a nil-conn slot and cancelled ctx: want error")
 	}
 	if !lockFree(c, 2*time.Second) {

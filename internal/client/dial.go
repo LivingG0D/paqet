@@ -57,34 +57,37 @@ func (c *Client) pick() (*timedConn, tnet.Conn) {
 	return best, best.conn
 }
 
-// newConn hands back a usable conn, redialing the least-loaded slot when its
-// health check fails.
+// newConn hands back a usable conn and the slot holding it, redialing when the
+// slot is dead.
 //
-// c.mu is held only to pick a slot and to publish a replacement — never across
-// Ping, Close, or a redial. Each of those can block for tens of seconds (smux
-// bounds OpenStream and Close at openCloseTimeout, 30s, and a data frame is
-// bounded only by whatever deadline the caller sets), and c.mu gates every new
-// proxied connection plus the stats reporter, the autoscaler and shutdown. Held
-// across that I/O, one stalled conn wedges the whole client.
-func (c *Client) newConn(ctx context.Context) (tnet.Conn, error) {
+// This runs once per proxied connection, so it does no I/O of its own. It used
+// to do two smux stream round-trips here — a Ping(false) liveness probe and a
+// re-send of the static TCPF config — which cost a SYN+FIN control frame pair
+// each, plus a server-side stream that read EOF and logged an error. Liveness
+// is now a local IsClosed check, and TCPF is sent once per session by
+// createConn, where it belongs.
+//
+// c.mu is held only to pick a slot and to publish a replacement, never across a
+// redial: that can block for tens of seconds, and c.mu gates every new proxied
+// connection plus the stats reporter, the autoscaler and shutdown.
+func (c *Client) newConn(ctx context.Context) (*timedConn, tnet.Conn, error) {
 	tc, conn := c.pick()
 	if tc == nil {
-		return nil, errNoConns
+		return nil, nil, errNoConns
 	}
 
+	if conn != nil && !conn.IsClosed() {
+		return tc, conn, nil
+	}
 	if conn != nil {
-		go func() {
-			if err := tc.sendTCPF(conn); err != nil {
-				flog.Debugf("failed to send TCPF config: %v", err)
-			}
-		}()
-		if err := conn.Ping(false); err == nil {
-			return conn, nil
-		}
 		flog.Infof("connection lost, retrying....")
 	}
 
-	return c.redial(ctx, tc, conn)
+	fresh, err := c.redial(ctx, tc, conn)
+	if err != nil {
+		return nil, nil, err
+	}
+	return tc, fresh, nil
 }
 
 // redial replaces tc's conn with a fresh one. dialMu serialises redials of a
@@ -172,17 +175,26 @@ func (c *Client) newStrm(ctx context.Context) (tnet.Strm, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		conn, err := c.newConn(ctx)
+		tc, conn, err := c.newConn(ctx)
 		if err != nil {
 			flog.Debugf("session creation failed (attempt %d/%d), retrying: %v", i+1, maxRetries, err)
 			continue
 		}
+
 		strm, err := conn.OpenStrm()
-		if err != nil {
-			flog.Debugf("failed to open stream (attempt %d/%d), retrying: %v", i+1, maxRetries, err)
-			continue
+		if err == nil {
+			return strm, nil
 		}
-		return strm, nil
+
+		// OpenStrm is the real liveness probe, and the only one that costs
+		// nothing extra: it fails when the session is closed, has gone away, or
+		// has exhausted stream IDs — the last two of which IsClosed cannot see.
+		// Redial the slot rather than retrying against a conn that will just
+		// refuse again.
+		flog.Debugf("failed to open stream (attempt %d/%d), redialing: %v", i+1, maxRetries, err)
+		if _, rerr := c.redial(ctx, tc, conn); rerr != nil {
+			flog.Debugf("redial after stream failure: %v", rerr)
+		}
 	}
 	return nil, fmt.Errorf("failed to open stream after %d retries", maxRetries)
 }
