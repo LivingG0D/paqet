@@ -1,6 +1,7 @@
 package client
 
 import (
+	"sync"
 	"time"
 
 	"paqet/internal/conf"
@@ -9,10 +10,18 @@ import (
 	"paqet/internal/tnet/kcp"
 )
 
+// tcpfWriteTimeout bounds the PTCPF control write. smux applies no write
+// deadline of its own, so without this a stalled peer parks the write until the
+// session's keepalive timeout (90s by default here).
+const tcpfWriteTimeout = 10 * time.Second
+
 type timedConn struct {
-	cfg    *conf.Conf
-	conn   tnet.Conn
-	expire time.Time
+	cfg *conf.Conf
+	// dialMu serialises redials of this slot. Held across the dial, so it must
+	// never be taken while holding Client.mu (see Client.redial).
+	dialMu sync.Mutex
+	// conn is guarded by Client.mu.
+	conn tnet.Conn
 }
 
 func newTimedConn(cfg *conf.Conf) (*timedConn, error) {
@@ -31,8 +40,9 @@ func (tc *timedConn) createConn() (tnet.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = tc.sendTCPF(conn)
-	if err != nil {
+	if err := tc.sendTCPF(conn); err != nil {
+		// The dial succeeded, so close it rather than leaking the session.
+		conn.Close()
 		return nil, err
 	}
 	return conn, nil
@@ -45,12 +55,12 @@ func (tc *timedConn) sendTCPF(conn tnet.Conn) error {
 	}
 	defer strm.Close()
 
-	p := protocol.Proto{Type: protocol.PTCPF, TCPF: tc.cfg.Network.TCP.RF}
-	err = p.Write(strm)
-	if err != nil {
+	if err := strm.SetWriteDeadline(time.Now().Add(tcpfWriteTimeout)); err != nil {
 		return err
 	}
-	return nil
+
+	p := protocol.Proto{Type: protocol.PTCPF, TCPF: tc.cfg.Network.TCP.RF}
+	return p.Write(strm)
 }
 
 func (tc *timedConn) close() {

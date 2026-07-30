@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -12,13 +13,34 @@ import (
 	"paqet/internal/tnet"
 )
 
-// stubConn is a no-op tnet.Conn that records whether Close was called.
-type stubConn struct{ closed atomic.Bool }
+// stubConn is a no-op tnet.Conn that records whether Close was called. The
+// zero value is usable; the ping* fields are opt-in for tests that need to
+// control Ping timing.
+type stubConn struct {
+	closed  atomic.Bool
+	streams int
 
-func (s *stubConn) OpenStrm() (tnet.Strm, error)     { return nil, nil }
-func (s *stubConn) AcceptStrm() (tnet.Strm, error)   { return nil, nil }
-func (s *stubConn) NumStreams() int                  { return 0 }
-func (s *stubConn) Ping(bool) error                  { return nil }
+	pingOnce    sync.Once
+	pingEntered chan struct{} // closed on first Ping, if non-nil
+	pingBlock   chan struct{} // Ping blocks until this closes, if non-nil
+}
+
+// errNoStrm keeps the stub honest: a real Conn never returns a nil Strm with a
+// nil error, and callers dereference the result when err is nil.
+var errNoStrm = errors.New("stubConn: streams not supported")
+
+func (s *stubConn) OpenStrm() (tnet.Strm, error)   { return nil, errNoStrm }
+func (s *stubConn) AcceptStrm() (tnet.Strm, error) { return nil, errNoStrm }
+func (s *stubConn) NumStreams() int                { return s.streams }
+func (s *stubConn) Ping(bool) error {
+	if s.pingEntered != nil {
+		s.pingOnce.Do(func() { close(s.pingEntered) })
+	}
+	if s.pingBlock != nil {
+		<-s.pingBlock
+	}
+	return nil
+}
 func (s *stubConn) Close() error                     { s.closed.Store(true); return nil }
 func (s *stubConn) LocalAddr() net.Addr              { return nil }
 func (s *stubConn) RemoteAddr() net.Addr             { return nil }
