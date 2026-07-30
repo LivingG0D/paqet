@@ -231,3 +231,73 @@ func TestScaleDownKeepsMinConns(t *testing.T) {
 		t.Errorf("pool size = %d, want 2", len(c.iter.Items))
 	}
 }
+
+// TestPoolSaturatedIgnoresDeadConn covers half of a recovery hole introduced
+// when pick started routing around closed conns. A closed session reports zero
+// streams, so a dead slot used to look like spare capacity and held
+// allOverloaded false forever — which switched scale-up off entirely, no matter
+// how saturated the surviving conns were.
+func TestPoolSaturatedIgnoresDeadConn(t *testing.T) {
+	cfg := &conf.Conf{}
+	c := newTestClient(cfg)
+
+	dead := &stubConn{}
+	dead.Close()
+	c.iter.Items = append(c.iter.Items,
+		&timedConn{cfg: cfg, conn: &stubConn{streams: maxStreamsPerConn}},
+		&timedConn{cfg: cfg, conn: &stubConn{streams: maxStreamsPerConn}},
+		&timedConn{cfg: cfg, conn: dead},
+	)
+
+	saturated, n := c.poolSaturated()
+	if !saturated {
+		t.Error("a dead conn counted as spare capacity, so scale-up can never fire")
+	}
+	if n != 3 {
+		t.Errorf("pool size = %d, want 3", n)
+	}
+}
+
+// TestPoolSaturatedSeesRealCapacity is the converse: a live conn with room must
+// still prevent scale-up.
+func TestPoolSaturatedSeesRealCapacity(t *testing.T) {
+	cfg := &conf.Conf{}
+	c := newTestClient(cfg)
+	c.iter.Items = append(c.iter.Items,
+		&timedConn{cfg: cfg, conn: &stubConn{streams: maxStreamsPerConn}},
+		&timedConn{cfg: cfg, conn: &stubConn{streams: 1}},
+	)
+
+	if saturated, _ := c.poolSaturated(); saturated {
+		t.Error("pool reported saturated while a live conn still had room")
+	}
+}
+
+// TestDeadSlotsFound covers the other half: repairDead must be able to see a
+// dead slot that pick will never hand out, so something redials it.
+func TestDeadSlotsFound(t *testing.T) {
+	cfg := &conf.Conf{}
+	c := newTestClient(cfg)
+
+	dead := &stubConn{}
+	dead.Close()
+	deadTC := &timedConn{cfg: cfg, conn: dead}
+	c.iter.Items = append(c.iter.Items,
+		&timedConn{cfg: cfg, conn: &stubConn{streams: 3}},
+		deadTC,
+		&timedConn{cfg: cfg}, // never dialled: not dead, just empty
+	)
+
+	slots, conns := c.deadSlots()
+	if len(slots) != 1 || slots[0] != deadTC {
+		t.Fatalf("deadSlots found %d slots, want exactly the closed one", len(slots))
+	}
+	if len(conns) != 1 || conns[0] != dead {
+		t.Error("deadSlots did not return the conn the slot was holding")
+	}
+
+	// pick must still route traffic away from it — repair is the only path.
+	if _, conn := c.pick(); conn == dead {
+		t.Error("pick handed out the dead conn; it should route around it")
+	}
+}

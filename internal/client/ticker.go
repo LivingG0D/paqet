@@ -28,6 +28,7 @@ func (c *Client) ticker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-connScaleTicker.C:
+			c.repairDead(ctx)
 			c.scaleConnections(ctx)
 		}
 	}
@@ -124,19 +125,70 @@ func (c *Client) scaleConnections(ctx context.Context) {
 	c.scaleDown(c.scaleUp(ctx))
 }
 
-// scaleUp adds one conn when every existing conn is saturated. It returns the
-// number of slots that existed beforehand, whether or not it grew the pool.
-func (c *Client) scaleUp(ctx context.Context) int {
+// deadSlots returns the slots whose session has died, with the conn each was
+// holding when we looked.
+func (c *Client) deadSlots() ([]*timedConn, []tnet.Conn) {
 	c.mu.Lock()
-	numConns := len(c.iter.Items)
-	allOverloaded := true
+	defer c.mu.Unlock()
+
+	var slots []*timedConn
+	var conns []tnet.Conn
 	for _, tc := range c.iter.Items {
-		if tc.conn != nil && tc.conn.NumStreams() < maxStreamsPerConn {
-			allOverloaded = false
+		if tc.conn != nil && tc.conn.IsClosed() {
+			slots = append(slots, tc)
+			conns = append(conns, tc.conn)
+		}
+	}
+	return slots, conns
+}
+
+// repairDead redials slots whose session has died.
+//
+// Nothing on the request path will do it: pick deliberately routes traffic away
+// from a closed conn, so a dead slot sitting alongside live ones is never
+// handed out and therefore never redialed. Without this it stays dead for the
+// life of the process — and because a closed conn reports zero streams, it also
+// makes the pool look like it still has spare capacity, which switches scale-up
+// off (see poolSaturated). One blip would otherwise cost a connection
+// permanently and disable autoscaling with it.
+func (c *Client) repairDead(ctx context.Context) {
+	slots, conns := c.deadSlots()
+	for i, tc := range slots {
+		if ctx.Err() != nil {
+			return
+		}
+		if _, err := c.redial(ctx, tc, conns[i]); err != nil {
+			flog.Debugf("autoscale: failed to repair dead connection: %v", err)
+			continue
+		}
+		flog.Infof("autoscale: repaired a dead connection")
+	}
+}
+
+// poolSaturated reports whether every usable conn is at the stream cap. A
+// closed conn is not usable capacity — repairDead deals with those — so it must
+// not make a saturated pool look like it still has room.
+func (c *Client) poolSaturated() (bool, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	saturated := true
+	for _, tc := range c.iter.Items {
+		if tc.conn == nil || tc.conn.IsClosed() {
+			continue
+		}
+		if tc.conn.NumStreams() < maxStreamsPerConn {
+			saturated = false
 			break
 		}
 	}
-	c.mu.Unlock()
+	return saturated, len(c.iter.Items)
+}
+
+// scaleUp adds one conn when every existing conn is saturated. It returns the
+// number of slots that existed beforehand, whether or not it grew the pool.
+func (c *Client) scaleUp(ctx context.Context) int {
+	allOverloaded, numConns := c.poolSaturated()
 
 	if !allOverloaded || numConns >= c.maxConns {
 		return numConns
