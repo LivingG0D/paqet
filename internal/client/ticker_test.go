@@ -9,11 +9,55 @@ import (
 	"paqet/internal/conf"
 )
 
-// TestScaleDownClosesOutsideLock guards the second half of the lock-scope work.
-// scaleConnections used to close the retired conn while holding c.mu, so a slow
-// teardown (smux Close is bounded at 30s, then a KCP flush and a pcap handle
-// close) blocked every newConn caller — and it ran on a 30s ticker regardless
-// of load.
+// TestScaleDownSkipsFreshConn is the regression guard for the autoscaler.
+//
+// Splitting scaleConnections into scaleUp+scaleDown moved the numConns read to
+// after scaleUp's append, which put the just-added conn inside the scale-down
+// loop's range. A fresh conn has zero streams — exactly the victim predicate —
+// so every scale-up was undone by the scale-down in the same tick: the pool
+// could never grow, and under sustained load the client dialled and tore down a
+// full pcap+KCP+smux session every 30s forever.
+//
+// scaleDown now only considers the slots that existed before scaleUp ran.
+// The pool must sit ABOVE minConns here, otherwise the eligible <= minConns
+// guard returns before the loop and the test would pass without ever
+// exercising the bound that actually fixes this.
+func TestScaleDownSkipsFreshConn(t *testing.T) {
+	cfg := &conf.Conf{}
+	c := newTestClient(cfg)
+	c.minConns, c.maxConns = 2, 8
+
+	fresh := &stubConn{}
+	saturated := []*stubConn{
+		{streams: maxStreamsPerConn},
+		{streams: maxStreamsPerConn},
+		{streams: maxStreamsPerConn},
+	}
+	for _, s := range saturated {
+		c.iter.Items = append(c.iter.Items, &timedConn{cfg: cfg, conn: s})
+	}
+	c.iter.Items = append(c.iter.Items, &timedConn{cfg: cfg, conn: fresh})
+
+	// 3 slots existed before the (simulated) scale-up appended the fourth.
+	c.scaleDown(3)
+
+	if fresh.closed.Load() {
+		t.Error("scale-down retired the conn scale-up just added")
+	}
+	for i, s := range saturated {
+		if s.closed.Load() {
+			t.Errorf("scale-down retired saturated conn %d", i)
+		}
+	}
+	if got := len(c.iter.Items); got != 4 {
+		t.Errorf("pool size = %d, want 4", got)
+	}
+}
+
+// TestScaleDownClosesOutsideLock guards the lock-scope work. scaleConnections
+// used to close the retired conn while holding c.mu, so a slow teardown (smux
+// Close is bounded at 30s, then a KCP flush and a pcap handle close) blocked
+// every newConn caller — on a 30s ticker, regardless of load.
 //
 // It also pins the retired flag: once a slot leaves the pool, an in-flight
 // newConn caller holding a stale reference must not redial it back to life.
@@ -32,7 +76,7 @@ func TestScaleDownClosesOutsideLock(t *testing.T) {
 	idleTC := &timedConn{cfg: cfg, conn: idle}
 	c.iter.Items = append(c.iter.Items, &timedConn{cfg: cfg, conn: busy}, idleTC)
 
-	go c.scaleDown()
+	go c.scaleDown(2)
 
 	select {
 	case <-idle.closeEntered:
@@ -67,14 +111,19 @@ func TestScaleDownClosesOutsideLock(t *testing.T) {
 // while the live conn is never tuned at all.
 func TestSwapTunerStopsPrevious(t *testing.T) {
 	c := newTestClient(&conf.Conf{})
-	tc := &timedConn{cfg: c.cfg}
+	conn := &stubConn{}
+	tc := &timedConn{cfg: c.cfg, conn: conn}
 
 	firstCtx, first := context.WithCancel(context.Background())
-	c.swapTuner(tc, first)
+	if !c.swapTuner(tc, conn, first) {
+		t.Fatal("swapTuner rejected the first binding")
+	}
 
 	secondCtx, second := context.WithCancel(context.Background())
 	defer second()
-	c.swapTuner(tc, second)
+	if !c.swapTuner(tc, conn, second) {
+		t.Fatal("swapTuner rejected the rebind")
+	}
 
 	select {
 	case <-firstCtx.Done():
@@ -84,13 +133,48 @@ func TestSwapTunerStopsPrevious(t *testing.T) {
 	if secondCtx.Err() != nil {
 		t.Error("newly bound tuner was cancelled")
 	}
+}
 
-	c.mu.Lock()
-	got := tc.stopTuner
-	c.mu.Unlock()
-	if got == nil {
-		t.Error("stopTuner was not recorded on the slot")
-	}
+// TestSwapTunerRejectsStaleBinding covers the window between sampling a
+// (slot, conn) pair and binding its tuner. bindTuner callers release c.mu in
+// between, so the slot may have been retired by scaleDown or given a different
+// conn by redial. Accepting the binding anyway would either strand a tuner on a
+// slot nothing can cancel from, or cancel the live conn's tuner and leave a
+// zombie running against a closed session.
+func TestSwapTunerRejectsStaleBinding(t *testing.T) {
+	c := newTestClient(&conf.Conf{})
+
+	t.Run("conn replaced", func(t *testing.T) {
+		current := &stubConn{}
+		tc := &timedConn{cfg: c.cfg, conn: current}
+
+		liveCtx, live := context.WithCancel(context.Background())
+		defer live()
+		if !c.swapTuner(tc, current, live) {
+			t.Fatal("swapTuner rejected a current binding")
+		}
+
+		stale := &stubConn{} // the conn this binding was sampled for
+		_, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if c.swapTuner(tc, stale, cancel) {
+			t.Error("swapTuner accepted a binding for a conn the slot no longer holds")
+		}
+		if liveCtx.Err() != nil {
+			t.Error("a stale binding cancelled the live conn's tuner")
+		}
+	})
+
+	t.Run("slot retired", func(t *testing.T) {
+		conn := &stubConn{}
+		tc := &timedConn{cfg: c.cfg, conn: conn, retired: true}
+
+		_, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if c.swapTuner(tc, conn, cancel) {
+			t.Error("swapTuner accepted a binding for a retired slot")
+		}
+	})
 }
 
 // TestScaleDownStopsTuner covers the scale-down half. Once a slot leaves the
@@ -109,7 +193,7 @@ func TestScaleDownStopsTuner(t *testing.T) {
 		idleTC,
 	)
 
-	c.scaleDown()
+	c.scaleDown(2)
 
 	select {
 	case <-tunerCtx.Done():
@@ -138,7 +222,7 @@ func TestScaleDownKeepsMinConns(t *testing.T) {
 		&timedConn{cfg: cfg, conn: b},
 	)
 
-	c.scaleDown()
+	c.scaleDown(2)
 
 	if a.closed.Load() || b.closed.Load() {
 		t.Error("scale-down dropped below minConns")
