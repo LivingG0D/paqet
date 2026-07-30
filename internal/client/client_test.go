@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"net"
 	"sync"
@@ -68,6 +69,7 @@ func newTestClient(cfg *conf.Conf) *Client {
 		udpPool:  &udpPool{strms: make(map[uint64]tnet.Strm)},
 		minConns: 1,
 		maxConns: 8,
+		tunerCtx: context.Background(),
 	}
 }
 

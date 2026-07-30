@@ -18,6 +18,11 @@ type Client struct {
 	mu       sync.Mutex
 	minConns int
 	maxConns int
+	// tunerCtx is the client-lifetime context, replaced by the real one in
+	// Start. Auto-tuners are parented on it rather than on the per-request ctx
+	// that reaches redial, so a tuner is not killed by the proxied connection
+	// that happened to trigger its rebind.
+	tunerCtx context.Context
 }
 
 func New(cfg *conf.Conf) (*Client, error) {
@@ -27,6 +32,7 @@ func New(cfg *conf.Conf) (*Client, error) {
 		udpPool:  &udpPool{strms: make(map[uint64]tnet.Strm)},
 		minConns: cfg.Transport.Conn,
 		maxConns: cfg.Transport.Conn * 2,
+		tunerCtx: context.Background(),
 	}
 	return c, nil
 }
@@ -52,6 +58,10 @@ func (c *Client) closeConns() {
 }
 
 func (c *Client) Start(ctx context.Context) error {
+	// Auto-tuners parent off this; set before any conn exists so no tuner is
+	// ever created against the placeholder from New.
+	c.tunerCtx = ctx
+
 	for i := range c.cfg.Transport.Conn {
 		tc, err := newTimedConn(c.cfg)
 		if err != nil {

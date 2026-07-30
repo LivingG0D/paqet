@@ -60,6 +60,71 @@ func TestScaleDownClosesOutsideLock(t *testing.T) {
 	}
 }
 
+// TestSwapTunerStopsPrevious covers the reconnect-orphan half of the tuner
+// lifecycle. AutoTuner captures its conn at construction and never rebinds, so
+// binding a tuner to a slot's new conn must stop the one bound to the old conn
+// — otherwise the orphan tunes a closed session every 10s until process exit
+// while the live conn is never tuned at all.
+func TestSwapTunerStopsPrevious(t *testing.T) {
+	c := newTestClient(&conf.Conf{})
+	tc := &timedConn{cfg: c.cfg}
+
+	firstCtx, first := context.WithCancel(context.Background())
+	c.swapTuner(tc, first)
+
+	secondCtx, second := context.WithCancel(context.Background())
+	defer second()
+	c.swapTuner(tc, second)
+
+	select {
+	case <-firstCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("previous tuner was not stopped when a new conn was bound")
+	}
+	if secondCtx.Err() != nil {
+		t.Error("newly bound tuner was cancelled")
+	}
+
+	c.mu.Lock()
+	got := tc.stopTuner
+	c.mu.Unlock()
+	if got == nil {
+		t.Error("stopTuner was not recorded on the slot")
+	}
+}
+
+// TestScaleDownStopsTuner covers the scale-down half. Once a slot leaves the
+// pool nothing else holds a reference to its tuner, so failing to cancel here
+// leaks the goroutine and pins the closed session graph out of GC — one per
+// scale cycle, on a daemon meant to run for weeks.
+func TestScaleDownStopsTuner(t *testing.T) {
+	cfg := &conf.Conf{}
+	c := newTestClient(cfg)
+	c.minConns = 1
+
+	tunerCtx, cancel := context.WithCancel(context.Background())
+	idleTC := &timedConn{cfg: cfg, conn: &stubConn{}, stopTuner: cancel}
+	c.iter.Items = append(c.iter.Items,
+		&timedConn{cfg: cfg, conn: &stubConn{streams: 5}},
+		idleTC,
+	)
+
+	c.scaleDown()
+
+	select {
+	case <-tunerCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("retired conn's auto-tuner was not stopped")
+	}
+
+	c.mu.Lock()
+	got := idleTC.stopTuner
+	c.mu.Unlock()
+	if got != nil {
+		t.Error("stopTuner was not cleared when the slot was retired")
+	}
+}
+
 // TestScaleDownKeepsMinConns checks the floor is respected: with the pool
 // already at minConns, an idle conn must not be retired.
 func TestScaleDownKeepsMinConns(t *testing.T) {

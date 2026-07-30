@@ -21,7 +21,7 @@ func (c *Client) ticker(ctx context.Context) {
 	defer connScaleTicker.Stop()
 
 	// Start auto-tuners for initial connections
-	c.startAutoTuners(ctx)
+	c.startAutoTuners()
 
 	for {
 		select {
@@ -33,20 +33,63 @@ func (c *Client) ticker(ctx context.Context) {
 	}
 }
 
-// startAutoTuners launches a window auto-tuner goroutine per KCP connection.
-func (c *Client) startAutoTuners(ctx context.Context) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// startAutoTuners binds a window auto-tuner to each connection in the pool.
+func (c *Client) startAutoTuners() {
+	type binding struct {
+		tc   *timedConn
+		conn tnet.Conn
+	}
 
+	c.mu.Lock()
+	bindings := make([]binding, 0, len(c.iter.Items))
 	for _, tc := range c.iter.Items {
-		if kcpConn, ok := tc.conn.(*kcp.Conn); ok {
-			at := kcp.NewAutoTuner(
-				kcpConn,
-				c.cfg.Transport.KCP.Sndwnd,
-				c.cfg.Transport.KCP.Rcvwnd,
-			)
-			go at.Run(ctx)
+		if tc.conn != nil {
+			bindings = append(bindings, binding{tc, tc.conn})
 		}
+	}
+	c.mu.Unlock()
+
+	for _, b := range bindings {
+		c.bindTuner(b.tc, b.conn)
+	}
+}
+
+// bindTuner starts a window auto-tuner for conn and records its canceller on
+// tc, stopping whatever tuner tc held before.
+//
+// AutoTuner captures its conn at construction and never rebinds, so a tuner is
+// only ever valid for one conn: without this, replacing a conn left the old
+// tuner running against a closed session while the new conn was never tuned.
+//
+// Tuners are parented on the client-lifetime ctx, not on the per-request ctx
+// that reaches redial — a tuner must outlive the proxied connection that
+// happened to trigger the redial.
+func (c *Client) bindTuner(tc *timedConn, conn tnet.Conn) {
+	kcpConn, ok := conn.(*kcp.Conn)
+	if !ok {
+		return
+	}
+	at := kcp.NewAutoTuner(
+		kcpConn,
+		c.cfg.Transport.KCP.Sndwnd,
+		c.cfg.Transport.KCP.Rcvwnd,
+	)
+	ctx, cancel := context.WithCancel(c.tunerCtx)
+	c.swapTuner(tc, cancel)
+	go at.Run(ctx)
+}
+
+// swapTuner installs cancel as tc's tuner canceller and stops the previous one.
+// The old canceller runs outside c.mu — cancel itself is cheap, but the lock
+// gates every new proxied connection and is not worth holding for it.
+func (c *Client) swapTuner(tc *timedConn, cancel context.CancelFunc) {
+	c.mu.Lock()
+	old := tc.stopTuner
+	tc.stopTuner = cancel
+	c.mu.Unlock()
+
+	if old != nil {
+		old()
 	}
 }
 
@@ -83,6 +126,9 @@ func (c *Client) scaleUp(ctx context.Context) {
 		return
 	}
 
+	// tc is still unpublished here, so reading its conn needs no lock.
+	conn := tc.conn
+
 	c.mu.Lock()
 	if len(c.iter.Items) >= c.maxConns {
 		// The pool grew while we were dialing — discard rather than overshoot.
@@ -94,15 +140,7 @@ func (c *Client) scaleUp(ctx context.Context) {
 	total := len(c.iter.Items)
 	c.mu.Unlock()
 
-	// Start auto-tuner for new connection
-	if kcpConn, ok := tc.conn.(*kcp.Conn); ok {
-		at := kcp.NewAutoTuner(
-			kcpConn,
-			c.cfg.Transport.KCP.Sndwnd,
-			c.cfg.Transport.KCP.Rcvwnd,
-		)
-		go at.Run(ctx)
-	}
+	c.bindTuner(tc, conn)
 
 	flog.Infof("autoscale: added connection (%d → %d), all had >%d streams",
 		numConns, total, maxStreamsPerConn)
@@ -120,10 +158,12 @@ func (c *Client) scaleDown() {
 	// lock and closed outside it, and the slot is marked retired so an in-flight
 	// newConn caller holding a stale reference cannot redial it back to life.
 	var victim tnet.Conn
+	var stopTuner context.CancelFunc
 	for i := numConns - 1; i >= c.minConns; i-- {
 		tc := c.iter.Items[i]
 		if tc.conn != nil && tc.conn.NumStreams() == 0 {
-			victim, tc.retired = tc.conn, true
+			victim, stopTuner = tc.conn, tc.stopTuner
+			tc.retired, tc.stopTuner = true, nil
 			c.iter.Items = append(c.iter.Items[:i], c.iter.Items[i+1:]...)
 			break
 		}
@@ -133,6 +173,12 @@ func (c *Client) scaleDown() {
 
 	if victim == nil {
 		return
+	}
+	// Stop the tuner before dropping the conn: nothing else holds a reference
+	// to it once the slot leaves the pool, so it would otherwise tune a closed
+	// session until process exit.
+	if stopTuner != nil {
+		stopTuner()
 	}
 	victim.Close()
 	flog.Infof("autoscale: removed idle connection (%d → %d)", numConns, total)
