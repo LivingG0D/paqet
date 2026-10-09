@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
+	"sync"
 
 	"paqet/internal/client"
 	"paqet/internal/flog"
@@ -13,6 +15,9 @@ type Forward struct {
 	client     *client.Client
 	listenAddr string
 	targetAddr string
+
+	udpMu   sync.RWMutex
+	udpPool map[netip.AddrPort]*udpSess
 }
 
 func New(client *client.Client, listenAddr, targetAddr string) (*Forward, error) {
@@ -20,11 +25,11 @@ func New(client *client.Client, listenAddr, targetAddr string) (*Forward, error)
 		client:     client,
 		listenAddr: listenAddr,
 		targetAddr: targetAddr,
+		udpPool:    make(map[netip.AddrPort]*udpSess),
 	}, nil
 }
 
 func (f *Forward) Start(ctx context.Context, protocol string) error {
-	flog.Debugf("starting %s forwarder: %s -> %s", protocol, f.listenAddr, f.targetAddr)
 	switch protocol {
 	case "tcp":
 		return f.startTCP(ctx)
@@ -44,10 +49,7 @@ func (f *Forward) startTCP(ctx context.Context) error {
 	}
 
 	go f.serveTCP(ctx, listener)
-	go func() {
-		<-ctx.Done()
-		listener.Close()
-	}()
+	context.AfterFunc(ctx, func() { listener.Close() })
 
 	return nil
 }
@@ -65,10 +67,7 @@ func (f *Forward) startUDP(ctx context.Context) error {
 	}
 
 	go f.serveUDP(ctx, conn)
-	go func() {
-		<-ctx.Done()
-		conn.Close()
-	}()
+	context.AfterFunc(ctx, func() { conn.Close() })
 
 	return nil
 }

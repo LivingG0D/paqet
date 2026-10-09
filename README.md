@@ -56,7 +56,7 @@ Options include: view logs, edit config, tune performance (KCP mode, MTU, connec
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.27+
 - libpcap development headers (`libpcap-dev` on Debian/Ubuntu)
 - Root/admin privileges (required for raw socket access)
 
@@ -145,7 +145,6 @@ Replace `9999` with your listen port.
 |---------|-------------|
 | `paqet run -c config.yaml` | Start the proxy (server or client) |
 | `paqet secret` | Generate a random encryption key |
-| `paqet iface` | List available network interfaces |
 | `paqet ping` | Connectivity test |
 | `paqet dump` | Packet capture debug tool |
 | `paqet version` | Show version and build info |

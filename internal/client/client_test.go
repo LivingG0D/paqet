@@ -71,7 +71,7 @@ func newTestClient(cfg *conf.Conf) *Client {
 	return &Client{
 		cfg:      cfg,
 		iter:     &iterator.Iterator[*timedConn]{},
-		udpPool:  &udpPool{strms: make(map[uint64]tnet.Strm)},
+		udpPool:  newUDPPool(),
 		minConns: 1,
 		maxConns: 8,
 	}

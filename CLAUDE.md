@@ -11,7 +11,7 @@ paqet is a bidirectional, packet-level proxy that tunnels **KCP over raw TCP pac
 **CGO + libpcap are mandatory** — the pcap path won't compile or link without them. Pure-Go (`CGO_ENABLED=0`) builds fail.
 
 ```bash
-# Build (needs Go 1.25+, libpcap-dev, a C compiler)
+# Build (needs Go 1.27+, libpcap-dev, a C compiler)
 CGO_ENABLED=1 go build -o paqet ./cmd
 
 # Run — requires root (raw socket / pcap access)
@@ -53,7 +53,7 @@ A connection is assembled bottom-up; understanding paqet means following this la
 6. **`internal/client`** — opens smux streams, writes the protocol header, bridges ingress traffic. `timed_conn.go` owns the `PacketConn`+KCP dial lifecycle and reconnection; `ticker.go` autoscales the pool every 30s off the *mean* live stream count per conn (one proxied connection = one stream, so this tracks concurrent users) between `transport.conn` and `2×transport.conn`; `udp_pool.go` pools UDP sessions.
 7. **Ingress (client side):** `internal/socks` (SOCKS5 server, dynamic forwarding) and/or `internal/forward` (static port forwarding). Both feed into the client streams above.
 
-`cmd/run` is the entry: `conf.LoadFromFile` → `setDefaults`/`validate` → branch on `cfg.Role` (`client`|`server`). Other subcommands: `secret` (keygen), `iface` (list NICs), `ping` (connectivity test), `dump` (pcap debug), `version`.
+`cmd/run` is the entry: `conf.LoadFromFile` → `setDefaults`/`validate` → branch on `cfg.Role` (`client`|`server`). Other subcommands: `secret` (keygen), `ping` (connectivity test), `dump` (pcap debug), `version`.
 
 ## Configuration
 

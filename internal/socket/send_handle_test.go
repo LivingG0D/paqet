@@ -16,14 +16,7 @@ import (
 // touches. It deliberately leaves handle nil: buildTCPHeader never reads the
 // pcap handle, so the test needs no capture device and no root privileges.
 func newTestSendHandle() *SendHandle {
-	mss := []byte{0x05, 0xb4} // 1460
-	return &SendHandle{
-		srcPort:  12345,
-		baseTime: 1_000_000,
-		seqSeed:  0xdeadbeef,
-		tcpPool:  sync.Pool{New: func() any { return &layers.TCP{} }},
-		optsPool: sync.Pool{New: func() any { return newTCPOpts(mss) }},
-	}
+	return newSendHandle(nil, 12345, 0)
 }
 
 // TestBuildTCPHeaderConcurrent is the regression guard for the send-path data
@@ -34,7 +27,7 @@ func newTestSendHandle() *SendHandle {
 // Before the fix, buildTCPHeader wrote the per-packet timestamp into a single
 // []layers.TCPOption shared on the handle (h.synOptions/h.ackOptions), so
 // concurrent senders raced on the same 8-byte OptionData backing array. With
-// each packet borrowing its own *tcpOpts from optsPool, there is no shared
+// each packet borrowing its own *encoder from ePool, there is no shared
 // mutable state and -race stays clean. Reintroducing the shared slices trips
 // the detector here.
 func TestBuildTCPHeaderConcurrent(t *testing.T) {
@@ -49,23 +42,22 @@ func TestBuildTCPHeaderConcurrent(t *testing.T) {
 			defer wg.Done()
 			var acc uint32
 			for i := range iters {
-				opts := h.optsPool.Get().(*tcpOpts)
+				e := h.ePool.Get().(*encoder)
 				// Alternate SYN and ACK packets. ACK is set on both so the SYN
 				// branch also computes tcp.Ack, matching the production paths.
 				f := conf.TCPF{SYN: (id+i)%2 == 0, ACK: true}
-				tcp := h.buildTCPHeader(80, f, opts)
+				h.buildTCPHeader(e, 80, f)
 
 				// Concurrent read of the timestamp bytes: this is the access
 				// that races against another goroutine's write when the backing
 				// array is shared.
-				for _, opt := range tcp.Options {
+				for _, opt := range e.tcp.Options {
 					if len(opt.OptionData) >= 4 {
 						acc += binary.BigEndian.Uint32(opt.OptionData[:4])
 					}
 				}
 
-				h.tcpPool.Put(tcp)
-				h.optsPool.Put(opts)
+				h.ePool.Put(e)
 			}
 			sinks[id] = acc
 		}(g)
@@ -81,8 +73,9 @@ func TestBuildTCPHeaderConcurrent(t *testing.T) {
 func TestBuildTCPHeaderOptionShape(t *testing.T) {
 	h := newTestSendHandle()
 
-	synOpts := h.optsPool.Get().(*tcpOpts)
-	syn := h.buildTCPHeader(80, conf.TCPF{SYN: true, ACK: true}, synOpts)
+	e := h.ePool.Get().(*encoder)
+	h.buildTCPHeader(e, 80, conf.TCPF{SYN: true, ACK: true})
+	syn := e.tcp
 	wantSyn := []layers.TCPOptionKind{
 		layers.TCPOptionKindMSS,
 		layers.TCPOptionKindSACKPermitted,
@@ -97,11 +90,9 @@ func TestBuildTCPHeaderOptionShape(t *testing.T) {
 	if got := len(syn.Options[2].OptionData); got != 8 {
 		t.Errorf("SYN Timestamps OptionData = %d bytes, want 8", got)
 	}
-	h.tcpPool.Put(syn)
-	h.optsPool.Put(synOpts)
 
-	ackOpts := h.optsPool.Get().(*tcpOpts)
-	ack := h.buildTCPHeader(80, conf.TCPF{ACK: true}, ackOpts)
+	h.buildTCPHeader(e, 80, conf.TCPF{ACK: true})
+	ack := e.tcp
 	wantAck := []layers.TCPOptionKind{
 		layers.TCPOptionKindNop,
 		layers.TCPOptionKindNop,
@@ -111,8 +102,7 @@ func TestBuildTCPHeaderOptionShape(t *testing.T) {
 	if got := len(ack.Options[2].OptionData); got != 8 {
 		t.Errorf("ACK Timestamps OptionData = %d bytes, want 8", got)
 	}
-	h.tcpPool.Put(ack)
-	h.optsPool.Put(ackOpts)
+	h.ePool.Put(e)
 }
 
 // TestSendPacketAfterClose pins the guard that keeps a send from reaching a

@@ -1,21 +1,20 @@
 package main
 
 import (
-	"os"
+	"log"
+
+	"github.com/spf13/cobra"
+
 	"paqet/cmd/dump"
-	"paqet/cmd/iface"
 	"paqet/cmd/ping"
 	"paqet/cmd/run"
 	"paqet/cmd/secret"
 	"paqet/cmd/version"
-	"paqet/internal/flog"
-
-	"github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "paqet",
-	Short: "KCP transport over raw TCP packet.",
+	Short: "KCP transport over raw TCP packet",
 	Long:  `paqet is a bidirectional packet-level proxy using KCP and raw socket transport with encryption.`,
 }
 
@@ -24,11 +23,9 @@ func main() {
 	rootCmd.AddCommand(dump.Cmd)
 	rootCmd.AddCommand(ping.Cmd)
 	rootCmd.AddCommand(secret.Cmd)
-	rootCmd.AddCommand(iface.Cmd)
 	rootCmd.AddCommand(version.Cmd)
 
 	if err := rootCmd.Execute(); err != nil {
-		flog.Errorf("%v", err)
-		os.Exit(1)
+		log.Fatalf("%v", err)
 	}
 }

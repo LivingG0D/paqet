@@ -19,10 +19,28 @@ import (
 	"paqet/internal/pkg/iterator"
 )
 
-type TCPF struct {
+type tcpF struct {
 	tcpF       iterator.Iterator[conf.TCPF]
 	clientTCPF map[uint64]*iterator.Iterator[conf.TCPF]
 	mu         sync.RWMutex
+}
+
+// encoder holds the reusable layer structs and option backing arrays for one
+// in-flight packet. Each Write borrows its own encoder from SendHandle.ePool,
+// so concurrent senders never share the timestamp bytes buildTCPHeader rewrites
+// per packet.
+type encoder struct {
+	eth layers.Ethernet
+	ip4 layers.IPv4
+	ip6 layers.IPv6
+	tcp layers.TCP
+
+	opts [5]layers.TCPOption
+	ts   [8]byte
+	mss  [2]byte
+	ws   [1]byte
+
+	buf gopacket.SerializeBuffer
 }
 
 type SendHandle struct {
@@ -35,61 +53,26 @@ type SendHandle struct {
 	srcIPv6RHWA net.HardwareAddr
 	srcPort     uint16
 	dscp        uint8
-	baseTime    uint32
-	tsCounter   uint32
+	time        uint32
+	tsCounter   atomic.Uint32
 	seqSeed     uint32
-	tcpF        TCPF
-	ethPool     sync.Pool
-	ipv4Pool    sync.Pool
-	ipv6Pool    sync.Pool
-	tcpPool     sync.Pool
-	bufPool     sync.Pool
-	optsPool    sync.Pool // *tcpOpts; per-packet TCP option slices (see tcpOpts)
-}
-
-// tcpOpts holds the TCP option slices for a single in-flight packet. Each
-// packet borrows its own holder from SendHandle.optsPool so that concurrent
-// senders never share the timestamp backing array that buildTCPHeader rewrites
-// per packet. syn and ack are prebuilt once per holder; only ts changes.
-type tcpOpts struct {
-	syn []layers.TCPOption
-	ack []layers.TCPOption
-	ts  [8]byte // backs OptionData of the Timestamps option in syn[2]/ack[2]
-}
-
-// newTCPOpts builds an option holder. mss is the per-handle randomized MSS
-// bytes — read-only and safely shared across all holders. ts is private per
-// holder so a packet's timestamp write is never observed by another goroutine.
-func newTCPOpts(mss []byte) *tcpOpts {
-	o := &tcpOpts{}
-	o.syn = []layers.TCPOption{
-		{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: mss},
-		{OptionType: layers.TCPOptionKindSACKPermitted, OptionLength: 2},
-		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: o.ts[:]},
-		{OptionType: layers.TCPOptionKindNop},
-		{OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{8}},
-	}
-	o.ack = []layers.TCPOption{
-		{OptionType: layers.TCPOptionKindNop},
-		{OptionType: layers.TCPOptionKindNop},
-		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: o.ts[:]},
-	}
-	return o
+	tcpF        tcpF
+	ePool       sync.Pool
 }
 
 // fastRandUint32 returns an unpredictable uint32 for per-packet fingerprint
 // jitter (TTL/window/timestamp/seq). It uses math/rand/v2's top-level
 // generator, which is safe for concurrent use (per-thread runtime state, no
 // syscall, no lock). This matters because buildTCPHeader runs concurrently
-// across many KCP/smux streams: a shared *rand.Rand — as previously used here —
-// is explicitly NOT safe for concurrent use (see math/rand/v2 docs) and races
-// on the send path under `go test -race`.
+// across many KCP/smux streams: a shared *rand.Rand is explicitly NOT safe for
+// concurrent use (see math/rand/v2 docs) and races on the send path under
+// `go test -race`.
 func fastRandUint32() uint32 {
 	return randv2.Uint32()
 }
 
 func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
-	handle, err := newHandle(cfg, pcap.BlockForever)
+	handle, err := newHandle(cfg, 256*1024, 128, pcap.BlockForever)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open pcap handle: %w", err)
 	}
@@ -101,48 +84,13 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 		}
 	}
 
-	// MSS: randomize between 1360–1460 to avoid static fingerprint
-	mssVal := 1360 + int(fastRandUint32()%101)
-	mssBytes := []byte{byte(mssVal >> 8), byte(mssVal & 0xFF)}
-
-	sh := &SendHandle{
-		handle:   handle,
-		srcPort:  uint16(cfg.Port),
-		dscp:     uint8(cfg.PCAP.DSCP),
-		baseTime: uint32(time.Now().UnixNano() / int64(time.Millisecond)),
-		seqSeed:  fastRandUint32(),
-		tcpF:     TCPF{tcpF: iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF}, clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
-		ethPool: sync.Pool{
-			New: func() any {
-				return &layers.Ethernet{SrcMAC: cfg.Interface.HardwareAddr}
-			},
-		},
-		ipv4Pool: sync.Pool{
-			New: func() any {
-				return &layers.IPv4{}
-			},
-		},
-		ipv6Pool: sync.Pool{
-			New: func() any {
-				return &layers.IPv6{}
-			},
-		},
-		tcpPool: sync.Pool{
-			New: func() any {
-				return &layers.TCP{}
-			},
-		},
-		bufPool: sync.Pool{
-			New: func() any {
-				return gopacket.NewSerializeBuffer()
-			},
-		},
-		optsPool: sync.Pool{
-			New: func() any {
-				return newTCPOpts(mssBytes)
-			},
-		},
+	if err := handle.SetBPFFilter("less 0"); err != nil {
+		return nil, fmt.Errorf("failed to set BPF filter: %w", err)
 	}
+
+	sh := newSendHandle(cfg.Interface.HardwareAddr, uint16(cfg.Port), uint8(cfg.PCAP.DSCP))
+	sh.handle = handle
+	sh.tcpF.tcpF = iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF}
 	if cfg.IPv4.Addr != nil {
 		sh.srcIPv4 = cfg.IPv4.Addr.IP
 		sh.srcIPv4RHWA = cfg.IPv4.Router
@@ -154,122 +102,137 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 	return sh, nil
 }
 
-func (h *SendHandle) buildIPv4Header(dstIP net.IP) *layers.IPv4 {
-	ip := h.ipv4Pool.Get().(*layers.IPv4)
-	// TOS: DSCP value shifted left 2 bits (ECN=0), default 0 = normal traffic
-	tos := h.dscp << 2
-	// TTL: jitter 63–65 to avoid static fingerprint
-	ttl := uint8(63 + fastRandUint32()%3)
-	*ip = layers.IPv4{
-		Version:  4,
-		IHL:      5,
-		TOS:      tos,
-		TTL:      ttl,
+// newSendHandle builds everything but the pcap handle and addresses, so tests
+// can exercise the packet-building path without a capture device.
+func newSendHandle(srcMAC net.HardwareAddr, srcPort uint16, dscp uint8) *SendHandle {
+	// MSS: randomize between 1360–1460 once per handle to avoid a static fingerprint
+	mss := 1360 + uint16(fastRandUint32()%101)
+
+	sh := &SendHandle{
+		srcPort: srcPort,
+		dscp:    dscp,
+		time:    uint32(time.Now().UnixNano() / int64(time.Millisecond)),
+		seqSeed: fastRandUint32(),
+		tcpF:    tcpF{clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
+	}
+	sh.ePool.New = func() any {
+		return &encoder{
+			eth: layers.Ethernet{SrcMAC: srcMAC},
+			mss: [2]byte{byte(mss >> 8), byte(mss)},
+			ws:  [1]byte{8},
+			buf: gopacket.NewSerializeBuffer(),
+		}
+	}
+	return sh
+}
+
+func (h *SendHandle) buildIPv4Header(e *encoder, dstIP net.IP) {
+	e.ip4 = layers.IPv4{
+		Version: 4,
+		IHL:     5,
+		// TOS: DSCP value shifted left 2 bits (ECN=0), default 0 = normal traffic
+		TOS: h.dscp << 2,
+		// TTL: jitter 63–65 to avoid a static fingerprint
+		TTL:      uint8(63 + fastRandUint32()%3),
 		Flags:    layers.IPv4DontFragment,
 		Protocol: layers.IPProtocolTCP,
 		SrcIP:    h.srcIPv4,
 		DstIP:    dstIP,
 	}
-	return ip
 }
 
-func (h *SendHandle) buildIPv6Header(dstIP net.IP) *layers.IPv6 {
-	ip := h.ipv6Pool.Get().(*layers.IPv6)
-	tc := h.dscp << 2
-	// HopLimit: jitter 63–65
-	hl := uint8(63 + fastRandUint32()%3)
-	*ip = layers.IPv6{
+func (h *SendHandle) buildIPv6Header(e *encoder, dstIP net.IP) {
+	e.ip6 = layers.IPv6{
 		Version:      6,
-		TrafficClass: tc,
-		HopLimit:     hl,
-		NextHeader:   layers.IPProtocolTCP,
-		SrcIP:        h.srcIPv6,
-		DstIP:        dstIP,
+		TrafficClass: h.dscp << 2,
+		// HopLimit: jitter 63–65
+		HopLimit:   uint8(63 + fastRandUint32()%3),
+		NextHeader: layers.IPProtocolTCP,
+		SrcIP:      h.srcIPv6,
+		DstIP:      dstIP,
 	}
-	return ip
 }
 
-func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF, opts *tcpOpts) *layers.TCP {
-	tcp := h.tcpPool.Get().(*layers.TCP)
-	// Window: randomize between 64240–65535 to avoid static fingerprint
-	window := uint16(64240 + fastRandUint32()%1296)
-	*tcp = layers.TCP{
+func (h *SendHandle) buildTCPHeader(e *encoder, dstPort uint16, f conf.TCPF) {
+	e.tcp = layers.TCP{
 		SrcPort: layers.TCPPort(h.srcPort),
 		DstPort: layers.TCPPort(dstPort),
 		FIN:     f.FIN, SYN: f.SYN, RST: f.RST, PSH: f.PSH, ACK: f.ACK, URG: f.URG, ECE: f.ECE, CWR: f.CWR, NS: f.NS,
-		Window: window,
+		// Window: randomize between 64240–65535 to avoid a static fingerprint
+		Window: uint16(64240 + fastRandUint32()%1296),
 	}
 
-	counter := atomic.AddUint32(&h.tsCounter, 1)
+	counter := h.tsCounter.Add(1)
 	// Timestamp: base + counter-derived value + random jitter (0–7ms)
-	jitter := fastRandUint32() % 8
-	tsVal := h.baseTime + (counter >> 3) + jitter
+	tsVal := h.time + (counter >> 3) + fastRandUint32()%8
+	// Seq: seed-based + counter with jitter
+	seq := h.seqSeed + counter*1461 + fastRandUint32()%64
+	opts := e.opts[:0]
 	if f.SYN {
-		binary.BigEndian.PutUint32(opts.ts[0:4], tsVal)
-		binary.BigEndian.PutUint32(opts.ts[4:8], 0)
-		tcp.Options = opts.syn
-		// Seq: seed-based + counter with jitter
-		tcp.Seq = h.seqSeed + counter*1461 + fastRandUint32()%64
-		tcp.Ack = 0
+		binary.BigEndian.PutUint32(e.ts[0:4], tsVal)
+		binary.BigEndian.PutUint32(e.ts[4:8], 0)
+		opts = append(opts,
+			layers.TCPOption{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: e.mss[:]},
+			layers.TCPOption{OptionType: layers.TCPOptionKindSACKPermitted, OptionLength: 2},
+			layers.TCPOption{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: e.ts[:]},
+			layers.TCPOption{OptionType: layers.TCPOptionKindNop},
+			layers.TCPOption{OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: e.ws[:]},
+		)
+		e.tcp.Seq = seq
+		e.tcp.Ack = 0
 		if f.ACK {
-			tcp.Ack = tcp.Seq + 1
+			e.tcp.Ack = e.tcp.Seq + 1
 		}
 	} else {
 		tsEcr := tsVal - (counter%200 + 50) - fastRandUint32()%10
-		binary.BigEndian.PutUint32(opts.ts[0:4], tsVal)
-		binary.BigEndian.PutUint32(opts.ts[4:8], tsEcr)
-		tcp.Options = opts.ack
-		// Seq/Ack: seed-based with realistic-looking increments and jitter
+		binary.BigEndian.PutUint32(e.ts[0:4], tsVal)
+		binary.BigEndian.PutUint32(e.ts[4:8], tsEcr)
+		opts = append(opts,
+			layers.TCPOption{OptionType: layers.TCPOptionKindNop},
+			layers.TCPOption{OptionType: layers.TCPOptionKindNop},
+			layers.TCPOption{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: e.ts[:]},
+		)
+		// Ack: realistic-looking lag behind seq, with jitter
 		dataLen := fastRandUint32()%1400 + 100
-		seq := h.seqSeed + counter*1461 + fastRandUint32()%64
-		tcp.Seq = seq
-		tcp.Ack = seq - dataLen + fastRandUint32()%32
+		e.tcp.Seq = seq
+		e.tcp.Ack = seq - dataLen + fastRandUint32()%32
 	}
-
-	return tcp
+	e.tcp.Options = opts
 }
 
 func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
-	buf := h.bufPool.Get().(gopacket.SerializeBuffer)
-	ethLayer := h.ethPool.Get().(*layers.Ethernet)
+	e := h.ePool.Get().(*encoder)
 	defer func() {
-		buf.Clear()
-		h.bufPool.Put(buf)
-		h.ethPool.Put(ethLayer)
+		e.buf.Clear()
+		h.ePool.Put(e)
 	}()
 
 	dstIP := addr.IP
 	dstPort := uint16(addr.Port)
 
-	f := h.getClientTCPF(dstIP, dstPort)
-	tcpOpt := h.optsPool.Get().(*tcpOpts)
-	defer h.optsPool.Put(tcpOpt)
-	tcpLayer := h.buildTCPHeader(dstPort, f, tcpOpt)
-	defer h.tcpPool.Put(tcpLayer)
+	h.buildTCPHeader(e, dstPort, h.getClientTCPF(dstIP, dstPort))
 
 	var ipLayer gopacket.SerializableLayer
 	if dstIP.To4() != nil {
-		ip := h.buildIPv4Header(dstIP)
-		defer h.ipv4Pool.Put(ip)
-		ipLayer = ip
-		tcpLayer.SetNetworkLayerForChecksum(ip)
-		ethLayer.DstMAC = h.srcIPv4RHWA
-		ethLayer.EthernetType = layers.EthernetTypeIPv4
+		h.buildIPv4Header(e, dstIP)
+		ipLayer = &e.ip4
+		e.tcp.SetNetworkLayerForChecksum(&e.ip4)
+		e.eth.DstMAC = h.srcIPv4RHWA
+		e.eth.EthernetType = layers.EthernetTypeIPv4
 	} else {
-		ip := h.buildIPv6Header(dstIP)
-		defer h.ipv6Pool.Put(ip)
-		ipLayer = ip
-		tcpLayer.SetNetworkLayerForChecksum(ip)
-		ethLayer.DstMAC = h.srcIPv6RHWA
-		ethLayer.EthernetType = layers.EthernetTypeIPv6
+		h.buildIPv6Header(e, dstIP)
+		ipLayer = &e.ip6
+		e.tcp.SetNetworkLayerForChecksum(&e.ip6)
+		e.eth.DstMAC = h.srcIPv6RHWA
+		e.eth.EthernetType = layers.EthernetTypeIPv6
 	}
 
 	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
-	if err := gopacket.SerializeLayers(buf, opts, ethLayer, ipLayer, tcpLayer, gopacket.Payload(payload)); err != nil {
+	if err := gopacket.SerializeLayers(e.buf, opts, &e.eth, ipLayer, &e.tcp, gopacket.Payload(payload)); err != nil {
 		return err
 	}
 
-	return h.sendPacket(buf.Bytes())
+	return h.sendPacket(e.buf.Bytes())
 }
 
 // sendPacket writes one serialized frame to the pcap handle.

@@ -24,7 +24,7 @@ func New(cfg *conf.Conf) (*Client, error) {
 	c := &Client{
 		cfg:      cfg,
 		iter:     &iterator.Iterator[*timedConn]{},
-		udpPool:  &udpPool{strms: make(map[uint64]tnet.Strm)},
+		udpPool:  newUDPPool(),
 		minConns: cfg.Transport.Conn,
 		maxConns: cfg.Transport.Conn * 2,
 	}
@@ -58,7 +58,6 @@ func (c *Client) Start(ctx context.Context) error {
 			flog.Errorf("failed to create connection %d: %v", i+1, err)
 			return err
 		}
-		flog.Debugf("client connection %d created successfully", i+1)
 		c.iter.Items = append(c.iter.Items, tc)
 	}
 
@@ -82,12 +81,13 @@ func (c *Client) Start(ctx context.Context) error {
 	// Snapshot the startup count before the ticker goroutine can resize the pool.
 	numConns := len(c.iter.Items)
 
-	go c.ticker(ctx)
-	go func() {
-		<-ctx.Done()
+	context.AfterFunc(ctx, func() {
 		stats.Stop()
 		c.closeConns()
-	}()
+	})
+
+	go c.ticker(ctx)
+	go c.udpPool.ticker(ctx)
 
 	ipv4Addr := "<nil>"
 	ipv6Addr := "<nil>"
@@ -97,6 +97,6 @@ func (c *Client) Start(ctx context.Context) error {
 	if c.cfg.Network.IPv6.Addr != nil {
 		ipv6Addr = c.cfg.Network.IPv6.Addr.IP.String()
 	}
-	flog.Infof("Client started: IPv4:%s IPv6:%s -> %s (%d connections)", ipv4Addr, ipv6Addr, c.cfg.Server.Addr, numConns)
+	flog.Infof("client IPv4:%s IPv6:%s -> %s (%d connections)", ipv4Addr, ipv6Addr, c.cfg.Server.Addr, numConns)
 	return nil
 }

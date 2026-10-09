@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/gopacket/gopacket"
@@ -13,18 +15,23 @@ import (
 	"paqet/internal/conf"
 )
 
-type RecvHandle struct {
-	handle  *pcap.Handle
+type decoder struct {
+	parser  *gopacket.DecodingLayerParser
 	eth     layers.Ethernet
 	ip4     layers.IPv4
 	ip6     layers.IPv6
 	tcp     layers.TCP
-	parser  *gopacket.DecodingLayerParser
 	decoded []gopacket.LayerType
 }
 
+type RecvHandle struct {
+	handle *pcap.Handle
+	dPool  sync.Pool
+	mu     sync.Mutex
+}
+
 func NewRecvHandle(cfg *conf.Network) (*RecvHandle, error) {
-	handle, err := newHandle(cfg, time.Millisecond)
+	handle, err := newHandle(cfg, cfg.PCAP.Sockbuf, cfg.PCAP.SnapLen, 100*time.Millisecond)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open pcap handle: %w", err)
 	}
@@ -41,58 +48,52 @@ func NewRecvHandle(cfg *conf.Network) (*RecvHandle, error) {
 		return nil, fmt.Errorf("failed to set BPF filter: %w", err)
 	}
 
-	rh := &RecvHandle{
-		handle:  handle,
-		decoded: make([]gopacket.LayerType, 0, 4),
+	h := &RecvHandle{handle: handle}
+	h.dPool.New = func() any {
+		d := &decoder{decoded: make([]gopacket.LayerType, 0, 4)}
+		d.parser = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &d.eth, &d.ip4, &d.ip6, &d.tcp)
+		d.parser.IgnoreUnsupported = true
+		return d
 	}
 
-	// Pre-allocate decoder — avoids per-packet allocations
-	rh.parser = gopacket.NewDecodingLayerParser(
-		layers.LayerTypeEthernet,
-		&rh.eth, &rh.ip4, &rh.ip6, &rh.tcp,
-	)
-	rh.parser.IgnoreUnsupported = true
-
-	return rh, nil
+	return h, nil
 }
 
-func (h *RecvHandle) Read() ([]byte, net.Addr, error) {
-	data, _, err := h.handle.ReadPacketData()
+func (h *RecvHandle) Read(data []byte) (int, net.Addr, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	zdata, _, err := h.handle.ZeroCopyReadPacketData()
 	if err != nil {
-		return nil, nil, err
+		return 0, nil, err
 	}
 
-	h.decoded = h.decoded[:0]
-	if err := h.parser.DecodeLayers(data, &h.decoded); err != nil {
-		// Partial decode is ok — we may still have the layers we need
+	d := h.dPool.Get().(*decoder)
+	defer h.dPool.Put(d)
+
+	if err := d.parser.DecodeLayers(zdata, &d.decoded); err != nil {
+		return 0, nil, errNoPayload
 	}
 
 	addr := &net.UDPAddr{}
-	var haveIP, haveTCP bool
-	for _, lt := range h.decoded {
-		switch lt {
+	var payload []byte
+	for _, t := range d.decoded {
+		switch t {
 		case layers.LayerTypeIPv4:
-			addr.IP = h.ip4.SrcIP
-			haveIP = true
+			addr.IP = slices.Clone(d.ip4.SrcIP)
 		case layers.LayerTypeIPv6:
-			addr.IP = h.ip6.SrcIP
-			haveIP = true
+			addr.IP = slices.Clone(d.ip6.SrcIP)
 		case layers.LayerTypeTCP:
-			addr.Port = int(h.tcp.SrcPort)
-			haveTCP = true
+			addr.Port = int(d.tcp.SrcPort)
+			payload = d.tcp.Payload
 		}
 	}
 
-	// Missing network/transport layers — return nil addr (upstream #71)
-	if !haveIP || !haveTCP {
-		return nil, nil, nil
+	if addr.IP == nil || len(payload) == 0 {
+		return 0, nil, errNoPayload
 	}
 
-	payload := h.tcp.LayerPayload()
-	if len(payload) == 0 {
-		return nil, nil, nil
-	}
-	return payload, addr, nil
+	return copy(data, payload), addr, nil
 }
 
 func (h *RecvHandle) Close() {

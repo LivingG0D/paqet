@@ -42,9 +42,6 @@ network:
 transport:
   protocol: "kcp"  # Transport protocol (currently only "kcp" supported)
   conn: 4          # Number of connections (1-256, default: 1)
-  
-  # tcpbuf: 8192   # TCP buffer size in bytes
-  # udpbuf: 4096   # UDP buffer size in bytes
 
   # KCP protocol settings
   kcp:
