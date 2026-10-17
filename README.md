@@ -167,7 +167,7 @@ Replace `9999` with your listen port.
 
 ## Upgrading from paqet2
 
-Servers running the older `paqet2` can upgrade in-place. Run the installer and select **Option 1 (Update & Optimize)**:
+Servers running the older `paqet2` can upgrade in-place. Run the installer and pick **1) Update** at the first prompt:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LivingG0D/paqet/master/setup-paqet.sh | sudo bash

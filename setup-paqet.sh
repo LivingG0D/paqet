@@ -1,413 +1,293 @@
-#!/bin/bash
-set -eE
-export DEBIAN_FRONTEND=noninteractive
+#!/usr/bin/env bash
+# paqet installer — downloads a release, writes the config, and starts the systemd service.
+#
+# Run as root on the server:
+#   bash <(curl -fsSL https://raw.githubusercontent.com/LivingG0D/paqet/master/setup-paqet.sh)
+# The wizard asks for the role (server or client) and the transport settings; both sides must match on
+# the key, mode, MTU, block, and FEC. It ends by installing and opening the `paqet-ctl` control panel.
+set -uo pipefail
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# Friendly failure message with the failing line number
-trap 'echo -e "${RED}Error on line ${LINENO}. Installation aborted.${NC}" >&2' ERR
-
-# Default values
-INSTALL_DIR="/opt/paqet"
-BIN_NAME="paqet"
-SERVICE_NAME="paqet"
+REPO=LivingG0D/paqet
+BRANCH="${PAQET_BRANCH:-master}"
+INSTALL_DIR=/opt/paqet
+BIN_NAME=paqet
+SERVICE_NAME=paqet
 CONFIG_FILE="$INSTALL_DIR/config.yaml"
-REPO="LivingG0D/paqet"
+SELF=/usr/local/bin/paqet-ctl
+ROLE=''
+UPDATE=0
 
-# Check for existing installation
-SKIP_CONFIG=false
+if [ -t 1 ]; then Y=$'\e[1;33m' G=$'\e[32m' R=$'\e[31m' D=$'\e[2m' N=$'\e[0m'; else Y='' G='' R='' D='' N=''; fi
+
+say()  { printf '%s\n' "$*"; }
+good() { printf '%s✓%s %s\n' "$G" "$N" "$*"; }
+bad()  { printf '%s✗%s %s\n' "$R" "$N" "$*"; }
+
+# Read one answer into REPLY (default when empty). /dev/tty, so a `curl | bash` install can still ask.
+ask() { # prompt [default]
+  read -r -p "$1" REPLY < /dev/tty || { echo; exit 1; }
+  REPLY="${REPLY:-${2:-}}"
+}
+yes_no() { # prompt default(y|n)
+  ask "$1" "$2"
+  [[ $REPLY == [yY]* ]]
+}
+
+[ "$(id -u)" -eq 0 ] || { bad "Run as root: sudo bash setup-paqet.sh"; exit 1; }
+
+# paqet2 -> paqet: retired modes, pcap move, removed keys, and the standard tuning of a fresh install.
+migrate_config() {
+  local f="$CONFIG_FILE" old sockbuf=16777216
+  [ -f "$f" ] || return 0
+  say "Backing up the config to config.yaml.bak"
+  cp "$f" "$f.bak"
+  # Retired KCP modes: they must go before the new binary reads the config, or validation fails.
+  if grep -qE 'mode: "(turbo|eco|stable)"' "$f"; then
+    sed -i 's/mode: "turbo"/mode: "fast2"/; s/mode: "eco"/mode: "normal"/; s/mode: "stable"/mode: "normal"/' "$f"
+    say "  KCP modes remapped (turbo -> fast2, eco/stable -> normal)"
+  fi
+  # paqet2 kept pcap at the top level with buffer_mb; paqet wants it under network as sockbuf (bytes).
+  if grep -q '^pcap:' "$f"; then
+    old=$(grep 'buffer_mb:' "$f" | head -n1 | tr -cd '0-9')
+    if [ -n "$old" ] && [ "$old" -gt 0 ]; then sockbuf=$((old * 1024 * 1024)); fi
+    sed -i '/^pcap:/,/^[^ ]/{/^pcap:/d;/^  /d}' "$f"
+    sed -i '/^$/N;/^\n$/d' "$f"   # squeeze the blank lines the removal leaves
+    if ! grep -q 'sockbuf:' "$f"; then
+      sed -i '/^network:/a \  pcap:\n    sockbuf: '"$sockbuf" "$f"
+    fi
+    say "  pcap: moved under network (sockbuf: $sockbuf bytes)"
+  fi
+  if ! grep -q 'sockbuf:' "$f"; then
+    sed -i '/^network:/a \  pcap:\n    sockbuf: 16777216' "$f"
+  fi
+  # Keys paqet2 had but paqet dropped: harmless to the parser, removed to keep the file tidy.
+  sed -i -e '/^\s*promisc:/d' -e '/^\s*snaplen:/d' -e '/^\s*dscp:/d' -e '/^\s*tos:/d' "$f"
+  # KCP needs an explicit connection count.
+  if grep -q 'protocol: "kcp"' "$f" && ! grep -q 'conn:' "$f"; then
+    sed -i '/protocol: "kcp"/a \  conn: 8' "$f"
+  fi
+  # Standard tuning, the same a fresh wizard run would write.
+  sed -i -e 's/conn: .*/conn: 8/' -e 's/block: .*/block: "salsa20"/' -e 's/mtu: .*/mtu: 1250/' \
+    -e 's/sockbuf: .*/sockbuf: 16777216/' "$f"
+  sed -i -e '/^\s*dshard:/d' -e '/^\s*pshard:/d' "$f"
+  sed -i '/block:/a\    dshard: 0\n    pshard: 0' "$f"
+  chmod 600 "$f" "$f.bak" 2>/dev/null || true
+  good "Config migrated: salsa20, conn 8, MTU 1250, FEC off, 16 MB buffer."
+}
 
 if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN_NAME" ]; then
-    echo -e "${BLUE}=== Existing Installation Detected ===${NC}"
-    echo "1) Update & Optimize (Safe Migration) - Keeps ports/IPs, updates core"
-    echo "2) Fresh Install (Remove all settings and re-configure)"
-    read -r -p "Select option [1/2]: " INSTALL_OPT < /dev/tty
-
-    if [ "$INSTALL_OPT" == "1" ]; then
-        echo -e "${BLUE}Updating binary and migrating config...${NC}"
-        systemctl stop "$SERVICE_NAME" || true
-        SKIP_CONFIG=true
-
-        # Migration Logic
-        if [ -f "$INSTALL_DIR/config.yaml" ]; then
-            echo "Backing up config to config.yaml.bak"
-            cp "$INSTALL_DIR/config.yaml" "$INSTALL_DIR/config.yaml.bak"
-
-            # ============================================================
-            # paqet2 -> paqet Migration + Optimization
-            # ============================================================
-
-            # --- Step 1: Remap removed KCP modes (paqet2 had turbo/eco/stable) ---
-            # Must happen BEFORE binary loads the config, otherwise validation fails
-            if grep -q 'mode: "turbo"' "$INSTALL_DIR/config.yaml" 2>/dev/null; then
-                sed -i 's/mode: "turbo"/mode: "fast2"/' "$INSTALL_DIR/config.yaml"
-                echo "Migrated KCP mode: turbo -> fast2"
-            fi
-            if grep -q 'mode: "eco"' "$INSTALL_DIR/config.yaml" 2>/dev/null; then
-                sed -i 's/mode: "eco"/mode: "normal"/' "$INSTALL_DIR/config.yaml"
-                echo "Migrated KCP mode: eco -> normal"
-            fi
-            if grep -q 'mode: "stable"' "$INSTALL_DIR/config.yaml" 2>/dev/null; then
-                sed -i 's/mode: "stable"/mode: "normal"/' "$INSTALL_DIR/config.yaml"
-                echo "Migrated KCP mode: stable -> normal"
-            fi
-
-            # --- Step 2: Fix top-level pcap (paqet2 configs have pcap at root level) ---
-            # New binary expects pcap nested under network:
-            if grep -q "^pcap:" "$INSTALL_DIR/config.yaml" 2>/dev/null; then
-                echo "Migrating top-level pcap section into network..."
-
-                # Extract buffer value if buffer_mb exists (old format). The
-                # "|| true" guards against grep finding nothing under set -e.
-                OLD_BUF_MB=$(grep "buffer_mb:" "$INSTALL_DIR/config.yaml" | head -n1 | sed 's/[^0-9]//g' || true)
-
-                # Remove top-level pcap block (pcap: and all indented children)
-                sed -i '/^pcap:/,/^[^ ]/{/^pcap:/d;/^  /d}' "$INSTALL_DIR/config.yaml"
-                # Clean any leftover empty lines from removal
-                sed -i '/^$/N;/^\n$/d' "$INSTALL_DIR/config.yaml"
-
-                # Insert pcap under network with sockbuf in bytes
-                if [ -n "$OLD_BUF_MB" ] && [ "$OLD_BUF_MB" -gt 0 ] 2>/dev/null; then
-                    SOCKBUF_BYTES=$((OLD_BUF_MB * 1024 * 1024))
-                else
-                    SOCKBUF_BYTES=16777216  # Default 16MB
-                fi
-
-                if ! grep -q "sockbuf:" "$INSTALL_DIR/config.yaml"; then
-                    sed -i '/^network:/a \  pcap:\n    sockbuf: '"$SOCKBUF_BYTES" "$INSTALL_DIR/config.yaml"
-                fi
-                echo "Migrated pcap: buffer_mb -> network.pcap.sockbuf ($SOCKBUF_BYTES bytes)"
-            fi
-
-            # Ensure pcap section exists under network (for configs that had neither)
-            if ! grep -q "sockbuf:" "$INSTALL_DIR/config.yaml"; then
-                sed -i '/^network:/a \  pcap:\n    sockbuf: 16777216' "$INSTALL_DIR/config.yaml"
-            fi
-
-            # --- Step 3: Remove orphaned paqet2-only config keys ---
-            # These fields existed in paqet2 but were removed in paqet
-            # Go YAML parser ignores them, but cleaning keeps config tidy
-            sed -i '/^\s*promisc:/d' "$INSTALL_DIR/config.yaml"
-            sed -i '/^\s*snaplen:/d' "$INSTALL_DIR/config.yaml"
-            sed -i '/^\s*dscp:/d' "$INSTALL_DIR/config.yaml"
-            sed -i '/^\s*tos:/d' "$INSTALL_DIR/config.yaml"
-
-            # --- Step 4: Ensure transport section has conn ---
-            if grep -q "protocol: \"kcp\"" "$INSTALL_DIR/config.yaml" && ! grep -q "conn:" "$INSTALL_DIR/config.yaml"; then
-                 sed -i '/protocol: "kcp"/a \  conn: 8' "$INSTALL_DIR/config.yaml"
-            fi
-
-            # --- Step 5: Apply standard optimization patches ---
-            sed -i 's/conn: .*/conn: 8/' "$INSTALL_DIR/config.yaml"
-            sed -i 's/block: .*/block: "salsa20"/' "$INSTALL_DIR/config.yaml"
-            sed -i 's/mtu: .*/mtu: 1250/' "$INSTALL_DIR/config.yaml"
-            sed -i 's/sockbuf: .*/sockbuf: 16777216/' "$INSTALL_DIR/config.yaml"
-            # Disable FEC: remove old dshard/pshard and add dshard=0/pshard=0
-            sed -i '/^\s*dshard:/d' "$INSTALL_DIR/config.yaml"
-            sed -i '/^\s*pshard:/d' "$INSTALL_DIR/config.yaml"
-            sed -i '/block:/a\    dshard: 0\n    pshard: 0' "$INSTALL_DIR/config.yaml"
-
-            chmod 600 "$INSTALL_DIR/config.yaml" "$INSTALL_DIR/config.yaml.bak" 2>/dev/null || true
-            echo -e "${GREEN}Configuration migrated (8 conns, salsa20, MTU 1250, FEC off, 16MB buffer).${NC}"
-        fi
-    else
-        echo -e "${BLUE}Stopping and removing existing service...${NC}"
-        systemctl stop "$SERVICE_NAME" || true
-        systemctl disable "$SERVICE_NAME" || true
-        rm -f "/etc/systemd/system/$SERVICE_NAME.service"
-        systemctl daemon-reload
-
-        if [ -f "$INSTALL_DIR/config.yaml" ]; then
-            echo -e "${BLUE}Backing up existing config to config.yaml.bak${NC}"
-            mv "$INSTALL_DIR/config.yaml" "$INSTALL_DIR/config.yaml.bak"
-        fi
-
-        if [ -f "$INSTALL_DIR/$BIN_NAME" ]; then
-            rm -f "$INSTALL_DIR/$BIN_NAME"
-        fi
+  say ""
+  say "${Y}Existing install found${N}: paqet is already set up on this server."
+  say "   1) Update: keep the config, replace the binary"
+  say "   2) Fresh install: remove everything and configure again"
+  ask "> " 1
+  if [ "$REPLY" = 1 ]; then
+    UPDATE=1
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    say "${Y}Update${N}: migrating the config and replacing the binary."
+    migrate_config
+  else
+    say "Removing the existing service..."
+    systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$SERVICE_NAME.service"
+    systemctl daemon-reload
+    if [ -f "$CONFIG_FILE" ]; then
+      say "Backing up the old config to config.yaml.bak"
+      mv "$CONFIG_FILE" "$CONFIG_FILE.bak"
     fi
+    rm -f "$INSTALL_DIR/$BIN_NAME"
+  fi
 fi
 
-
-echo -e "${BLUE}=== Paqet Installer & Configurator ===${NC}"
-
-# 1. Check Root
-if [ "$EUID" -ne 0 ]; then
-  echo -e "${RED}Please run as root (sudo)${NC}"
+say ""
+say "${Y}Dependencies${N}: libpcap-dev iproute2 curl jq tar gzip ca-certificates iputils-ping"
+if ! command -v apt-get >/dev/null 2>&1; then
+  bad "This installer requires apt-get (Debian/Ubuntu)."
   exit 1
 fi
-
-# 2. Install Dependencies
-echo -e "${BLUE}Installing dependencies...${NC}"
-if ! command -v apt-get >/dev/null 2>&1; then
-    echo -e "${RED}This installer requires apt-get (Debian/Ubuntu).${NC}"
-    exit 1
+if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 \
+  || ! command -v ping >/dev/null 2>&1 || [ ! -e /usr/include/pcap.h ]; then
+  apt-get update -qq
+  # On a fresh VPS unattended-upgrades often holds the dpkg lock for a while: wait for it.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=300 \
+    libpcap-dev iproute2 curl jq tar gzip ca-certificates iputils-ping \
+    || { bad "apt could not install the dependencies."; exit 1; }
+  good "Installed"
 fi
-apt-get update -qq
-apt-get install -y libpcap-dev iproute2 curl jq tar gzip ca-certificates iputils-ping
 
-# 3. Detect Architecture & Download
-ARCH=$(uname -m)
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-
-case "$ARCH" in
-    x86_64)        GOARCH="amd64";    FILENAME="amd64"    ;;
-    aarch64|arm64) GOARCH="arm64";    FILENAME="arm64"    ;;
-    armv7l|armv6l) GOARCH="arm";      FILENAME="arm32"    ;;
-    mips)          GOARCH="mips";     FILENAME="mips"     ;;
-    mipsel)        GOARCH="mipsle";   FILENAME="mipsle"   ;;
-    mips64)        GOARCH="mips64";   FILENAME="mips64"   ;;
-    mips64el)      GOARCH="mips64le"; FILENAME="mips64le" ;;
-    *)
-        echo -e "${RED}Unsupported architecture: $ARCH${NC}"
-        exit 1
-        ;;
+case $(uname -m) in
+  x86_64) FILENAME=amd64 ;;
+  aarch64 | arm64) FILENAME=arm64 ;;
+  armv7l | armv6l) FILENAME=arm32 ;;
+  mips) FILENAME=mips ;;
+  mipsel) FILENAME=mipsle ;;
+  mips64) FILENAME=mips64 ;;
+  mips64el) FILENAME=mips64le ;;
+  *) bad "Unsupported architecture: $(uname -m)"; exit 1 ;;
 esac
+good "System: linux/$FILENAME"
 
-echo -e "${GREEN}Detected System: $OS/$GOARCH${NC}"
+install -d -m 0755 "$INSTALL_DIR"
 
-mkdir -p "$INSTALL_DIR"
-chmod 755 "$INSTALL_DIR"
-
-# Try to find the latest release (including pre-releases)
-echo -e "${BLUE}Attempting to fetch latest release version...${NC}"
-LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=1" | jq -r '.[0].tag_name' || true)
-
-if [ "$LATEST_TAG" == "null" ] || [ -z "$LATEST_TAG" ]; then
-    echo -e "${RED}Could not fetch latest release (GitHub API rate limit or no network).${NC}"
-    echo -e "${BLUE}Enter the version manually (e.g., v1.0.0-alpha.36):${NC}"
-    read -r VERSION < /dev/tty
+say "${Y}Release${N}: looking up the latest paqet release..."
+LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" | jq -r '.[0].tag_name' 2>/dev/null || true)
+VERSION=''
+if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = null ]; then
+  bad "Could not fetch the latest release (GitHub API rate limit or no network)."
+  ask "Version to install (e.g. v1.0.0-alpha.36): "
+  VERSION=$REPLY
 else
-    # Set VERSION to LATEST_TAG for checking
-    VERSION="$LATEST_TAG"
-
-    # Verify if asset exists in the release
-    ASSET_NAME="paqet-linux-${FILENAME}-${VERSION}.tar.gz"
-    BINARY_NAME="paqet_linux_${FILENAME}"
-
-    ASSET_CHECK=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${LATEST_TAG}" | jq -r ".assets[] | select(.name == \"${ASSET_NAME}\") | .name" || true)
-
-    if [ -z "$ASSET_CHECK" ]; then
-        echo -e "${RED}Release $LATEST_TAG found, but asset '${ASSET_NAME}' is not yet uploaded.${NC}"
-        echo -e "${BLUE}The build pipeline might still be running. Please wait a few minutes and try again.${NC}"
-        echo -e "${BLUE}Or enter a previous working version manually:${NC}"
-        read -r VERSION < /dev/tty
-    else
-        VERSION="$LATEST_TAG"
-    fi
+  ASSET_NAME="paqet-linux-$FILENAME-$LATEST_TAG.tar.gz"
+  # A release can exist before its assets are uploaded: the build pipeline needs a few minutes.
+  ASSET_FOUND=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/tags/$LATEST_TAG" \
+    | jq -r ".assets[] | select(.name == \"$ASSET_NAME\") | .name" 2>/dev/null || true)
+  if [ -n "$ASSET_FOUND" ]; then
+    VERSION=$LATEST_TAG
+  else
+    bad "Release $LATEST_TAG does not have $ASSET_NAME yet."
+    ask "Version to install instead, or wait for the pipeline and rerun: "
+    VERSION=$REPLY
+  fi
 fi
+if [ -z "$VERSION" ]; then VERSION=$LATEST_TAG; fi
+ASSET_NAME="paqet-linux-$FILENAME-$VERSION.tar.gz"
+BINARY_NAME="paqet_linux_$FILENAME"
+DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/$ASSET_NAME"
 
-if [ -z "$VERSION" ]; then
-    VERSION="$LATEST_TAG"
-fi
-
-# Re-construct asset name in case the version was entered manually
-ASSET_NAME="paqet-linux-${FILENAME}-${VERSION}.tar.gz"
-BINARY_NAME="paqet_linux_${FILENAME}"
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET_NAME}"
-
-echo -e "${BLUE}Downloading from: $DOWNLOAD_URL${NC}"
-
-# Download + extract in a temp dir that is always cleaned up
+say "${Y}Download${N}: $DOWNLOAD_URL"
 TMP_DL=$(mktemp -d)
-trap 'rm -rf "$TMP_DL"; echo -e "${RED}Error on line ${LINENO}. Installation aborted.${NC}" >&2' ERR
-
-if curl -fL -o "$TMP_DL/${ASSET_NAME}" "$DOWNLOAD_URL"; then
-    echo "Download successful."
-
-    echo "Extracting..."
-    # The tarball file name uses dashes; the binary inside uses underscores.
-    tar -xzf "$TMP_DL/${ASSET_NAME}" -C "$TMP_DL"
-
-    if [ -f "$TMP_DL/${BINARY_NAME}" ]; then
-        mv "$TMP_DL/${BINARY_NAME}" "$INSTALL_DIR/$BIN_NAME"
-        chmod +x "$INSTALL_DIR/$BIN_NAME"
-        echo -e "${GREEN}Installed to $INSTALL_DIR/$BIN_NAME${NC}"
-    else
-        echo -e "${RED}Error: Extracted binary '${BINARY_NAME}' not found in archive.${NC}"
-        ls -l "$TMP_DL"
-        exit 1
-    fi
-else
-    echo -e "${RED}Error: Failed to download release asset.${NC}"
-    echo "URL: $DOWNLOAD_URL"
-    exit 1
+if ! curl -fL --connect-timeout 15 -o "$TMP_DL/$ASSET_NAME" "$DOWNLOAD_URL"; then
+  bad "Download failed."
+  say "  $DOWNLOAD_URL"
+  rm -rf "$TMP_DL"
+  exit 1
 fi
-
+tar -xzf "$TMP_DL/$ASSET_NAME" -C "$TMP_DL" || { bad "Not a valid archive."; rm -rf "$TMP_DL"; exit 1; }
+if [ ! -f "$TMP_DL/$BINARY_NAME" ]; then
+  bad "The archive did not contain $BINARY_NAME."
+  ls -l "$TMP_DL"
+  rm -rf "$TMP_DL"
+  exit 1
+fi
+install -m 0755 "$TMP_DL/$BINARY_NAME" "$INSTALL_DIR/$BIN_NAME" \
+  || { bad "Could not install the binary to $INSTALL_DIR."; rm -rf "$TMP_DL"; exit 1; }
 rm -rf "$TMP_DL"
-# Restore the simple ERR trap now that the temp dir is gone
-trap 'echo -e "${RED}Error on line ${LINENO}. Installation aborted.${NC}" >&2' ERR
+good "Installed $INSTALL_DIR/$BIN_NAME ($VERSION)"
 
-# Sanity check: the binary must actually run on this host
+# The binary must at least report its version, or the wizard below would fail later.
 if ! "$INSTALL_DIR/$BIN_NAME" version >/dev/null 2>&1; then
-    echo -e "${YELLOW}Warning: '$BIN_NAME version' did not run cleanly (continuing anyway).${NC}"
+  say "${Y}Warning${N}: '$BIN_NAME version' did not run cleanly (continuing anyway)."
 fi
 
-# 4. Configuration Wizard
-if [ "$SKIP_CONFIG" == "true" ]; then
-    echo -e "\n${GREEN}Skipping configuration (Update mode selected).${NC}"
+if [ "$UPDATE" = 1 ]; then
+  say ""
+  say "${Y}Config${N}: kept the existing $CONFIG_FILE."
 else
-    echo -e "\n${BLUE}=== Configuration ===${NC}"
-    echo "Is this server the Exit Node (Server) or the Entry Node (Client)?"
-    echo "1) Server (Exit Node - The destination)"
-    echo "2) Client (Entry Node - The machine you connect to)"
-    read -r -p "Select role [1/2]: " ROLE_OPT < /dev/tty
+  say ""
+  say "${Y}Configuration${N}: the wizard writes $CONFIG_FILE, both servers must agree on it."
+  say "${D}Run the wizard on the other server too; type the same values there.${N}"
+  say "   1) Server (exit node, the destination)"
+  say "   2) Client (entry node, the machine you connect from)"
+  ask "Role [1/2] (Enter = 1, server): " 1
+  case $REPLY in
+    2 | [cC]*) ROLE=client ;;
+    *) ROLE=server ;;
+  esac
 
-    # Helper to get Gateway MAC
-    get_gateway_mac() {
-        DEFAULT_IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-        GATEWAY_IP=$(ip route | grep default | awk '{print $3}' | head -n1)
-
-        # Try ip neigh first
-        MAC=$(ip neigh show "$GATEWAY_IP" | grep "$DEFAULT_IFACE" | awk '{print $5}')
-
-        if [ -z "$MAC" ]; then
-            # Try pinging gateway to populate ARP table
-            ping -c 1 -W 1 "$GATEWAY_IP" >/dev/null 2>&1 || true
-            MAC=$(ip neigh show "$GATEWAY_IP" | grep "$DEFAULT_IFACE" | awk '{print $5}')
-        fi
-
-        echo "$MAC"
-    }
-
-    # Helper to get Interface IP
-    get_iface_ip() {
-        local iface=$1
-        ip -4 addr show "$iface" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1
-    }
-
-    # Auto-detect Network Details (never abort detection under set -e)
-    AUTO_IFACE=$(ip route | grep default | awk '{print $5}' | head -n1 || true)
-    AUTO_MAC=$(get_gateway_mac || true)
-    AUTO_IP=$(get_iface_ip "$AUTO_IFACE" || true)
-
-    echo -e "\n${GREEN}Network Detection:${NC}"
-    echo "Interface:   $AUTO_IFACE"
-    echo "Local IP:    $AUTO_IP"
-    echo "Gateway MAC: $AUTO_MAC"
-    echo "-----------------------------------"
-
-    read -r -p "Use these detected settings? [Y/n] " USE_DETECTED < /dev/tty
-    if [[ "$USE_DETECTED" =~ ^[Nn]$ ]]; then
-        read -r -p "Enter Interface Name: " CFG_IFACE < /dev/tty
-        read -r -p "Enter Local IP: " CFG_IP < /dev/tty
-        read -r -p "Enter Gateway MAC: " CFG_MAC < /dev/tty
-    else
-        CFG_IFACE="$AUTO_IFACE"
-        CFG_IP="$AUTO_IP"
-        CFG_MAC="$AUTO_MAC"
+  # Raw packets need the interface, its IP, and the gateway MAC (the next hop they are sent to).
+  AUTO_IFACE=$(ip route | awk '/^default/ { print $5; exit }')
+  AUTO_GW='' AUTO_IP='' AUTO_MAC=''
+  if [ -z "$AUTO_IFACE" ]; then
+    bad "No default route found: enter the network details by hand."
+  else
+    AUTO_GW=$(ip route | awk '/^default/ { print $3; exit }')
+    AUTO_IP=$(ip -4 -o addr show "$AUTO_IFACE" | awk '{ split($4, a, "/"); print a[1]; exit }')
+    AUTO_MAC=$(ip neigh show "$AUTO_GW" 2>/dev/null | awk -v d="$AUTO_IFACE" 'index($0, d) { print $5; exit }')
+    if [ -z "$AUTO_MAC" ]; then
+      ping -c 1 -W 1 "$AUTO_GW" >/dev/null 2>&1 || true   # populates the ARP table
+      AUTO_MAC=$(ip neigh show "$AUTO_GW" 2>/dev/null | awk -v d="$AUTO_IFACE" 'index($0, d) { print $5; exit }')
     fi
+    say ""
+    say "${Y}Network${N}: found on this server"
+    say "  Interface:   $AUTO_IFACE"
+    say "  Local IP:    $AUTO_IP"
+    say "  Gateway MAC: $AUTO_MAC"
+  fi
+  if [ -z "$AUTO_IFACE" ] || ! yes_no "Use these settings? [Y/n] " y; then
+    ask "Interface: " "$AUTO_IFACE"
+    CFG_IFACE=$REPLY
+    ask "Local IP (without port): " "$AUTO_IP"
+    CFG_IP=$REPLY
+    ask "Gateway MAC: " "$AUTO_MAC"
+    CFG_MAC=$REPLY
+  else
+    CFG_IFACE=$AUTO_IFACE
+    CFG_IP=$AUTO_IP
+    CFG_MAC=$AUTO_MAC
+  fi
+  # Empty values would write a dead config: keep asking until all three are set.
+  while [ -z "$CFG_IFACE" ] || [ -z "$CFG_IP" ] || [ -z "$CFG_MAC" ]; do
+    bad "Network details incomplete; fill the missing field(s)."
+    [ -n "$CFG_IFACE" ] || { ask "Interface: "; CFG_IFACE=$REPLY; }
+    [ -n "$CFG_IP" ] || { ask "Local IP (without port): "; CFG_IP=$REPLY; }
+    [ -n "$CFG_MAC" ] || { ask "Gateway MAC: "; CFG_MAC=$REPLY; }
+  done
 
-    # Validate network params — empty values would write a dead config
-    while [ -z "$CFG_IFACE" ] || [ -z "$CFG_IP" ] || [ -z "$CFG_MAC" ]; do
-        echo -e "${YELLOW}Network details incomplete — please fill the missing field(s).${NC}"
-        if [ -z "$CFG_IFACE" ]; then read -r -p "Enter Interface Name: " CFG_IFACE < /dev/tty; fi
-        if [ -z "$CFG_IP" ];    then read -r -p "Enter Local IP (without port): " CFG_IP < /dev/tty; fi
-        if [ -z "$CFG_MAC" ];   then read -r -p "Enter Gateway MAC: " CFG_MAC < /dev/tty; fi
-    done
+  say ""
+  say "${Y}Secret key${N}: both servers must use the same one."
+  ask "Key (Enter = generate): "
+  if [ -z "$REPLY" ]; then
+    CFG_KEY=$("$INSTALL_DIR/$BIN_NAME" secret)
+    good "Generated key: $CFG_KEY"
+    bad "Save this key: the other server must use it."
+  else
+    CFG_KEY=$REPLY
+  fi
 
-    # Secret Key Handling
-    echo -e "\n${BLUE}Security Setup${NC}"
-    read -r -p "Enter a shared secret key (or press Enter to generate one): " CFG_KEY < /dev/tty
-    if [ -z "$CFG_KEY" ]; then
-        CFG_KEY=$("$INSTALL_DIR/$BIN_NAME" secret)
-        echo -e "${GREEN}Generated Key: $CFG_KEY${NC}"
-        echo -e "${RED}SAVE THIS KEY! You need it for the other side.${NC}"
-    fi
+  say ""
+  say "${Y}KCP mode${N}: 'normal' suits unstable or lossy paths; 'fast' is more aggressive."
+  ask "Mode [normal/fast/fast2/fast3/manual] (Enter = normal): " normal
+  KCP_MODE=$REPLY
+  ask "MTU (Enter = 1250; lower it when large packets get dropped): " 1250
+  KCP_MTU=$REPLY
 
-    # Performance Tuning
-    echo -e "\n${BLUE}Performance Tuning${NC}"
-    echo "KCP Mode determines aggressiveness. 'normal' is better for unstable/lossy networks; 'fast' is more aggressive."
-    read -r -p "KCP Mode [normal/fast/fast2/fast3/manual] (default normal): " KCP_MODE < /dev/tty
-    KCP_MODE=${KCP_MODE:-"normal"}
+  # sndwnd/rcvwnd tune for concurrency, not for one big download: the window is per-conn but the
+  # path is shared, so `conn` multiplies what is in flight (8 conns of 4096 segs is a 33x BDP
+  # overshoot — the over-admission behind the alpha.32 loss regression). Measured over a 37ms
+  # path, 64 streams: 4096 -> 230 Mbit/s unstable; 1024 -> 258 Mbit/s, stable, ~10x more
+  # consistent, ~100MB less server RSS (single-stream: 89 Mbit/s). Drop to 512 on lossy paths;
+  # raise toward 4096 for few users pulling big files. smuxbuf/streambuf are a throughput ceiling
+  # (streambuf/RTT per stream): 4MB measured within noise, so it stays. All four are overridable
+  # from the environment.
+  KCP_SNDWND=${KCP_SNDWND:-1024}
+  KCP_RCVWND=${KCP_RCVWND:-1024}
+  KCP_SMUXBUF=${KCP_SMUXBUF:-16777216}
+  KCP_STREAMBUF=${KCP_STREAMBUF:-4194304}
 
-    read -r -p "MTU Size (default 1250, lower if unstable): " KCP_MTU < /dev/tty
-    KCP_MTU=${KCP_MTU:-1250}
+  say ""
+  say "${Y}Encryption${N}: both sides must pick the same."
+  say "  salsa20                       Salsa20 stream cipher, no padding (default, best DPI bypass)"
+  say "  xor                           XOR, minimal CPU, basic header obfuscation"
+  say "  none                          no encryption; use when the outer tunnel already encrypts"
+  say "  aes, aes-128, aes-192, aes-128-gcm   AES, hardware-accelerated"
+  say "  sm4, blowfish, twofish, cast5, 3des, tea, xtea, null"
+  ask "Encryption (Enter = salsa20): " salsa20
+  KCP_BLOCK=$REPLY
 
-    # sndwnd/rcvwnd tune for CONCURRENCY, not for one big download. The window is
-    # per-conn but the path is shared, so `conn` multiplies what is in flight:
-    # 8 conns x 4096 segs x 1206B is ~40MB against a ~1.2MB BDP (250 Mbit/s,
-    # 37ms) — a 33x overshoot, and the same over-admission that caused the
-    # alpha.32 regression (9d5c72c: loss 8% -> 24%).
-    #
-    # Measured over a 37ms Iran<->TR path, 64 concurrent streams, interleaved
-    # runs (aggregate / single-stream / server-side retrans):
-    #   sndwnd 4096 -> 230 Mbit/s (unstable, 207-249) / 123 Mbit/s / 38-42%
-    #   sndwnd 2048 -> 244 Mbit/s                     /   -        / 30-37%
-    #   sndwnd 1024 -> 258 Mbit/s (stable,  257-260)  /  89 Mbit/s / 26-30%
-    #   sndwnd  512 -> 260 Mbit/s                     /  59 Mbit/s / 11.6%
-    # 1024 is the many-user default: +12.5% aggregate, ~10x more consistent, and
-    # ~100MB less server RSS, paid for with 28% of single-stream throughput.
-    # Serving few users who each pull large files? Raise toward 4096. Seeing high
-    # retrans on a lossy path? Drop to 512 — aggregate holds, only single-stream
-    # falls. (Measured on a 1-vCPU server that saturated at ~260 Mbit/s; on a
-    # bigger box the whole curve shifts up.)
-    #
-    # smuxbuf/streambuf are a throughput CEILING — one stream cannot exceed
-    # streambuf/RTT, one conn cannot exceed smuxbuf/RTT. Measurement showed
-    # streambuf 512KB/1MB/4MB within noise of each other once sndwnd is right,
-    # so 4MB stays: it costs nothing and lifts the per-stream ceiling.
-    KCP_SNDWND=${KCP_SNDWND:-1024}
-    KCP_RCVWND=${KCP_RCVWND:-1024}
-    KCP_SMUXBUF=${KCP_SMUXBUF:-16777216}
-    KCP_STREAMBUF=${KCP_STREAMBUF:-4194304}
+  if yes_no "FEC: 10% overhead, recovers packet loss (recommended only on lossy links) [y/N] " n; then
+    KCP_DSHARD=10 KCP_PSHARD=1
+    good "FEC on (dshard=10, pshard=1)"
+  else
+    KCP_DSHARD=0 KCP_PSHARD=0
+    good "FEC off"
+  fi
 
-    # Encryption Selection
-    echo -e "\n${BLUE}Encryption${NC}"
-    echo "Choose encryption for KCP packets (MUST match on both sides):"
-    echo ""
-    echo -e "  ${GREEN}Recommended:${NC}"
-    echo "    salsa20   - Salsa20 stream cipher. Fast, no block padding. Best DPI bypass. (DEFAULT)"
-    echo "    xor       - XOR cipher. Very fast, low CPU. Basic header obfuscation."
-    echo "    none      - No encryption. Zero CPU cost. Use when V2Ray/tunnel already encrypts."
-    echo ""
-    echo -e "  ${BLUE}Standard:${NC}"
-    echo "    aes       - AES-256 (auto key size). Strong, hardware-accelerated on modern CPUs."
-    echo "    aes-128   - AES-128. Slightly faster than AES-256, still very strong."
-    echo "    aes-192   - AES-192. Middle ground between AES-128 and AES-256."
-    echo "    aes-128-gcm - AES-128-GCM. Authenticated encryption (integrity + confidentiality)."
-    echo ""
-    echo -e "  ${CYAN}Specialized:${NC}"
-    echo "    sm4       - Chinese national standard. 128-bit block cipher."
-    echo "    blowfish  - Legacy. Fast, variable key length."
-    echo "    twofish   - AES finalist. Strong, but slower than AES."
-    echo "    cast5     - 128-bit. Used in older PGP."
-    echo "    3des      - Triple DES. Legacy, slow. Not recommended."
-    echo "    tea/xtea  - Tiny Encryption Algorithm. Simple, compact."
-    echo "    null      - Truly null (no processing at all). Debug only."
-    echo ""
-    read -r -p "Encryption [salsa20/xor/none/aes/...] (default salsa20): " KCP_BLOCK < /dev/tty
-    KCP_BLOCK=${KCP_BLOCK:-"salsa20"}
-
-    # FEC Selection
-    echo -e "\n${BLUE}Forward Error Correction (FEC)${NC}"
-    echo "FEC adds redundancy to recover lost packets without retransmission."
-    echo "  ON  (dshard=10, pshard=1) — 10% bandwidth overhead, better on lossy networks"
-    echo "  OFF (dshard=0, pshard=0)  — no overhead, recommended when using V2Ray tunnel (DEFAULT)"
-    read -r -p "Enable FEC? [y/N]: " FEC_ENABLE < /dev/tty
-    if [[ "$FEC_ENABLE" =~ ^[Yy]$ ]]; then
-        KCP_DSHARD=10
-        KCP_PSHARD=1
-        echo -e "${GREEN}FEC enabled (dshard=10, pshard=1)${NC}"
-    else
-        KCP_DSHARD=0
-        KCP_PSHARD=0
-        echo -e "${GREEN}FEC disabled${NC}"
-    fi
-
-    if [ "$ROLE_OPT" == "1" ]; then
-        # --- SERVER CONFIGURATION ---
-        ROLE="server"
-        read -r -p "Listen Port (default 9999): " PORT < /dev/tty
-        PORT=${PORT:-9999}
-
-        cat > "$CONFIG_FILE" <<EOF
+  if [ "$ROLE" = server ]; then
+    ask "Listen port (Enter = 9999): " 9999
+    PORT=$REPLY
+    say ""
+    say "${Y}Config${N}: writing $CONFIG_FILE"
+    cat > "$CONFIG_FILE" <<EOF
 role: "server"
 log:
   level: "info"
@@ -435,64 +315,62 @@ transport:
     dshard: $KCP_DSHARD
     pshard: $KCP_PSHARD
 EOF
-        chmod 600 "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    good "Config written."
 
-        echo -e "${GREEN}Config created at $CONFIG_FILE${NC}"
-
-        # Apply System Optimizations (Buffers)
-        if [ ! -f "/etc/sysctl.d/99-paqet.conf" ]; then
-            echo -e "\n${BLUE}Applying System Network Optimizations...${NC}"
-            cat > /etc/sysctl.d/99-paqet.conf <<EOF
+    # Kernel UDP buffers for the raw pcap path; written once and kept on later runs.
+    if [ ! -f /etc/sysctl.d/99-paqet.conf ]; then
+      say "${Y}System tuning${N}: raising the kernel UDP buffers to 32 MB."
+      cat > /etc/sysctl.d/99-paqet.conf <<EOF
 net.core.rmem_max=33554432
 net.core.wmem_max=33554432
 net.core.rmem_default=33554432
 net.core.wmem_default=33554432
 net.core.netdev_max_backlog=5000
 EOF
-            sysctl -p /etc/sysctl.d/99-paqet.conf
-        fi
+      sysctl -p /etc/sysctl.d/99-paqet.conf >/dev/null
+      good "Applied /etc/sysctl.d/99-paqet.conf"
+    fi
 
-        # Configure Firewall (iptables)
-        echo -e "\n${BLUE}Applying Firewall Rules (Anti-Probe/RST Prevention)...${NC}"
-
-        # Check if rules exist to avoid duplicates
-        if ! iptables -t raw -C PREROUTING -p tcp --dport "$PORT" -j NOTRACK 2>/dev/null; then
-            iptables -t raw -A PREROUTING -p tcp --dport "$PORT" -j NOTRACK
-            echo "Applied: raw PREROUTING NOTRACK"
-        fi
-
-        if ! iptables -t raw -C OUTPUT -p tcp --sport "$PORT" -j NOTRACK 2>/dev/null; then
-            iptables -t raw -A OUTPUT -p tcp --sport "$PORT" -j NOTRACK
-            echo "Applied: raw OUTPUT NOTRACK"
-        fi
-
-        # RST prevention via mangle
-        if ! iptables -t mangle -C OUTPUT -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP 2>/dev/null; then
-            iptables -t mangle -A OUTPUT -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP
-            echo "Applied: mangle OUTPUT DROP RST"
-        fi
-
-        # Persist iptables. Preseed debconf so the package install never prompts
-        # interactively (otherwise it hangs under `curl | sudo bash`).
-        echo -e "${BLUE}Persisting iptables rules...${NC}"
-        echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections
-        echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections
-        apt-get install -y iptables-persistent
-        netfilter-persistent save
-
+    # The kernel must not track or reset packets on the paqet port: without these rules it fights the
+    # raw path with RSTs and conntrack.
+    say "${Y}Firewall${N}: NOTRACK and RST suppression on TCP $PORT."
+    if ! iptables -t raw -C PREROUTING -p tcp --dport "$PORT" -j NOTRACK 2>/dev/null; then
+      iptables -t raw -A PREROUTING -p tcp --dport "$PORT" -j NOTRACK
+      good "raw PREROUTING NOTRACK"
+    fi
+    if ! iptables -t raw -C OUTPUT -p tcp --sport "$PORT" -j NOTRACK 2>/dev/null; then
+      iptables -t raw -A OUTPUT -p tcp --sport "$PORT" -j NOTRACK
+      good "raw OUTPUT NOTRACK"
+    fi
+    if ! iptables -t mangle -C OUTPUT -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP 2>/dev/null; then
+      iptables -t mangle -A OUTPUT -p tcp --sport "$PORT" --tcp-flags RST RST -j DROP
+      good "mangle OUTPUT DROP RST"
+    fi
+    # Preseed debconf: iptables-persistent otherwise prompts interactively and hangs `curl | sudo bash`.
+    echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections
+    echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent; then
+      netfilter-persistent save >/dev/null
+      good "Rules saved (iptables-persistent)"
     else
-        # --- CLIENT CONFIGURATION ---
-        ROLE="client"
-        read -r -p "Enter Remote Server IP: " SERVER_IP < /dev/tty
-        read -r -p "Enter Remote Server Port (default 9999): " SERVER_PORT < /dev/tty
-        SERVER_PORT=${SERVER_PORT:-9999}
+      bad "Could not install iptables-persistent; save the rules by hand."
+    fi
+  else
+    ask "Remote server IP: "
+    SERVER_IP=$REPLY
+    ask "Remote server port (Enter = 9999): " 9999
+    SERVER_PORT=$REPLY
 
-        echo -e "\n${BLUE}Client Mode:${NC}"
-        echo "1) SOCKS5 Proxy (Dynamic forwarding)"
-        echo "2) Port Forwarding (Map remote port to local)"
-        read -r -p "Select mode [1/2]: " CLIENT_MODE < /dev/tty
+    say ""
+    say "${Y}Client mode${N}"
+    say "   1) SOCKS5 proxy"
+    say "   2) Port forwarding"
+    ask "> " 1
+    CLIENT_MODE=$REPLY
 
-        cat > "$CONFIG_FILE" <<EOF
+    say "${Y}Config${N}: writing $CONFIG_FILE"
+    cat > "$CONFIG_FILE" <<EOF
 role: "client"
 log:
   level: "info"
@@ -521,91 +399,84 @@ transport:
     pshard: $KCP_PSHARD
 EOF
 
-        if [ "$CLIENT_MODE" == "1" ]; then
-            read -r -p "SOCKS5 Listen Address (default 0.0.0.0:1080): " SOCKS_ADDR < /dev/tty
-            SOCKS_ADDR=${SOCKS_ADDR:-"0.0.0.0:1080"}
-
-            cat >> "$CONFIG_FILE" <<EOF
+    if [ "$CLIENT_MODE" = 1 ]; then
+      ask "SOCKS5 listen address (Enter = 0.0.0.0:1080): " "0.0.0.0:1080"
+      SOCKS_ADDR=$REPLY
+      cat >> "$CONFIG_FILE" <<EOF
 socks5:
   - listen: "$SOCKS_ADDR"
 EOF
-        else
-            echo "forward:" >> "$CONFIG_FILE"
-
-            while true; do
-                echo -e "\n${BLUE}--- Add Forwarding Rule(s) ---${NC}"
-                echo "Enter '0.0.0.0:8080' for specific binding,"
-                echo "OR enter a list of ports '8080 8081' for bulk 1:1 mapping."
-                read -r -p "Input: " INPUT_VAL < /dev/tty
-
-                # Check for multiple ports (space detected)
-                if [[ "$INPUT_VAL" =~ [[:space:]] ]]; then
-                    # Bulk Mode
-                    TGT_IP="127.0.0.1"
-                    read -r -p "Protocol [tcp/udp] (default tcp): " FWD_PROTO < /dev/tty
-                    FWD_PROTO=${FWD_PROTO:-"tcp"}
-
-                    for FWD_PORT in $INPUT_VAL; do
-                        cat >> "$CONFIG_FILE" <<EOF
+      good "SOCKS5 on $SOCKS_ADDR"
+    else
+      echo "forward:" >> "$CONFIG_FILE"
+      while :; do
+        say ""
+        say "${Y}Forwarding rule${N}: '0.0.0.0:8080' binds one address; '8080 8081' maps each port 1:1."
+        ask "Ports (Enter = done): "
+        INPUT_VAL=$REPLY
+        [ -n "$INPUT_VAL" ] || break
+        if [[ $INPUT_VAL =~ [[:space:]] ]]; then
+          # Bulk 1:1 mapping: the listen and the target ports are the same.
+          TGT_IP=127.0.0.1
+          ask "Protocol [tcp/udp] (Enter = tcp): " tcp
+          FWD_PROTO=$REPLY
+          for FWD_PORT in $INPUT_VAL; do
+            cat >> "$CONFIG_FILE" <<EOF
   - listen: "0.0.0.0:$FWD_PORT"
     target: "$TGT_IP:$FWD_PORT"
     protocol: "$FWD_PROTO"
 EOF
-                        echo "Added: 0.0.0.0:$FWD_PORT -> $TGT_IP:$FWD_PORT"
-                    done
-
-                else
-                    # Single Entry Mode (Smart)
-                    # Check if input has colon (IP:Port)
-                    if [[ "$INPUT_VAL" == *":"* ]]; then
-                        LISTEN_ADDR="$INPUT_VAL"
-                        read -r -p "Target Destination (e.g., 127.0.0.1:80): " TARGET_ADDR < /dev/tty
-                    else
-                        # Just a port number
-                        LISTEN_ADDR="0.0.0.0:$INPUT_VAL"
-                        read -r -p "Target IP for port $INPUT_VAL (e.g., 127.0.0.1): " TGT_IP < /dev/tty
-                        TARGET_ADDR="$TGT_IP:$INPUT_VAL"
-                    fi
-
-                    read -r -p "Protocol [tcp/udp] (default tcp): " FWD_PROTO < /dev/tty
-                    FWD_PROTO=${FWD_PROTO:-"tcp"}
-
-                    cat >> "$CONFIG_FILE" <<EOF
+            good "0.0.0.0:$FWD_PORT -> $TGT_IP:$FWD_PORT"
+          done
+        else
+          if [[ $INPUT_VAL == *:* ]]; then
+            LISTEN_ADDR=$INPUT_VAL
+            ask "Target (e.g. 127.0.0.1:80): "
+            TARGET_ADDR=$REPLY
+          else
+            LISTEN_ADDR="0.0.0.0:$INPUT_VAL"
+            ask "Target IP for port $INPUT_VAL (e.g. 127.0.0.1): "
+            TGT_IP=$REPLY
+            TARGET_ADDR="$TGT_IP:$INPUT_VAL"
+          fi
+          ask "Protocol [tcp/udp] (Enter = tcp): " tcp
+          FWD_PROTO=$REPLY
+          cat >> "$CONFIG_FILE" <<EOF
   - listen: "$LISTEN_ADDR"
     target: "$TARGET_ADDR"
     protocol: "$FWD_PROTO"
 EOF
-                    echo "Added: $LISTEN_ADDR -> $TARGET_ADDR"
-                fi
-
-                echo -e "${GREEN}Rule(s) added!${NC}"
-                read -r -p "Add more rules? [y/N]: " ADD_MORE < /dev/tty
-                if [[ ! "$ADD_MORE" =~ ^[Yy]$ ]]; then
-                    break
-                fi
-            done
+          good "$LISTEN_ADDR -> $TARGET_ADDR"
         fi
-
-        chmod 600 "$CONFIG_FILE"
-        echo -e "${GREEN}Config created at $CONFIG_FILE${NC}"
+        yes_no "Add more rules? [y/N] " n || break
+      done
     fi
+    chmod 600 "$CONFIG_FILE"
+    good "Config written."
+  fi
 fi
 
-# 5. Create Systemd Service
-echo -e "\n${BLUE}Creating Systemd Service...${NC}"
-
-# Install the separate management script (paqet-ctl)
-if curl -fsSL "https://raw.githubusercontent.com/${REPO}/master/manage-paqet.sh" -o /usr/local/bin/paqet-ctl; then
-    chmod +x /usr/local/bin/paqet-ctl
+say ""
+say "${Y}Control panel${N}: installing paqet-ctl..."
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)
+if [ -n "$HERE" ] && [ -f "$HERE/manage-paqet.sh" ]; then
+  install -m 0755 "$HERE/manage-paqet.sh" "$SELF"
+  good "Control panel installed: paqet-ctl"
+elif curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/$REPO/$BRANCH/manage-paqet.sh" -o "$SELF.tmp"; then
+  install -m 0755 "$SELF.tmp" "$SELF"
+  rm -f "$SELF.tmp"
+  good "Control panel installed: paqet-ctl"
 else
-    echo -e "${YELLOW}Warning: could not fetch paqet-ctl (control panel). Skipping.${NC}"
+  rm -f "$SELF.tmp"
+  say "${Y}Warning${N}: could not fetch paqet-ctl (the panel will be missing)."
 fi
 
-# Determine ROLE for the unit description when running in update mode
-if [ -z "${ROLE:-}" ]; then
-    if grep -q 'role: "server"' "$CONFIG_FILE" 2>/dev/null; then ROLE="server"; else ROLE="client"; fi
+# In update mode nobody set ROLE: read it back from the config for the unit description.
+if [ -z "$ROLE" ]; then
+  if grep -q 'role: "server"' "$CONFIG_FILE" 2>/dev/null; then ROLE=server; else ROLE=client; fi
 fi
 
+say "${Y}Service${N}: writing /etc/systemd/system/$SERVICE_NAME.service"
 cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
 [Unit]
 Description=Paqet Proxy Service ($ROLE)
@@ -625,28 +496,25 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable "$SERVICE_NAME"
-systemctl restart "$SERVICE_NAME" || true
-
-# Health check: confirm the service actually came up
-sleep 1
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-    echo -e "${GREEN}Service started!${NC}"
-    systemctl status "$SERVICE_NAME" --no-pager | head -n 10
+systemctl enable --now "$SERVICE_NAME" >/dev/null 2>&1
+sleep 2
+if systemctl is-active -q "$SERVICE_NAME"; then
+  good "Service is running (it starts on every boot too)."
 else
-    echo -e "${RED}Service failed to start. Recent logs:${NC}"
-    journalctl -u "$SERVICE_NAME" -n 30 --no-pager || true
-    echo -e "${YELLOW}Fix the config, then: systemctl restart $SERVICE_NAME${NC}"
+  bad "Service failed to start. Recent logs:"
+  journalctl -u "$SERVICE_NAME" -n 30 --no-pager
+  say "${D}Fix the config, then: systemctl restart $SERVICE_NAME${N}"
 fi
 
-echo -e "\n${GREEN}Installation Complete!${NC}"
-if [ "$ROLE" == "server" ]; then
-    echo "Ensure your cloud provider firewall allows TCP port ${PORT:-9999}."
+say ""
+good "paqet installed."
+if [ "$ROLE" = server ]; then
+  say "  Open TCP ${PORT:-9999} in your provider's firewall."
 fi
-
-# Launch Control Panel
-if [ -x /usr/local/bin/paqet-ctl ]; then
-    echo -e "\n${BLUE}Launching Control Panel...${NC}"
-    sleep 1
-    /usr/local/bin/paqet-ctl
+if [ -x "$SELF" ]; then
+  say "  Manage it any time with: sudo paqet-ctl"
+  say ""
+  say "Starting the control panel..."
+  sleep 1
+  exec "$SELF"
 fi
