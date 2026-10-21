@@ -2,22 +2,26 @@ package socket
 
 import (
 	"encoding/binary"
-	"fmt"
 	randv2 "math/rand/v2"
 	"net"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
-	"github.com/gopacket/gopacket/pcap"
 
 	"paqet/internal/conf"
 	"paqet/internal/pkg/hash"
 	"paqet/internal/pkg/iterator"
 )
+
+// frameWriter sends one complete Ethernet frame: a pcap handle, or on Linux a
+// raw packet socket (handle_linux.go).
+type frameWriter interface {
+	WritePacketData(frame []byte) error
+	Close()
+}
 
 type tcpF struct {
 	tcpF       iterator.Iterator[conf.TCPF]
@@ -40,11 +44,14 @@ type encoder struct {
 	mss  [2]byte
 	ws   [1]byte
 
-	buf gopacket.SerializeBuffer
+	// payload is passed as &payload: converting the slice itself to a
+	// SerializableLayer would allocate on every packet.
+	payload gopacket.Payload
+	buf     gopacket.SerializeBuffer
 }
 
 type SendHandle struct {
-	handle      *pcap.Handle
+	handle      frameWriter
 	writeMu     sync.Mutex
 	closed      bool // guarded by writeMu; set by Close, checked by sendPacket
 	srcIPv4     net.IP
@@ -72,20 +79,9 @@ func fastRandUint32() uint32 {
 }
 
 func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
-	handle, err := newHandle(cfg, 256*1024, 128, pcap.BlockForever)
+	handle, err := openSendHandle(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open pcap handle: %w", err)
-	}
-
-	// SetDirection is not fully supported on Windows Npcap, so skip it
-	if runtime.GOOS != "windows" {
-		if err := handle.SetDirection(pcap.DirectionOut); err != nil {
-			return nil, fmt.Errorf("failed to set pcap direction out: %v", err)
-		}
-	}
-
-	if err := handle.SetBPFFilter("less 0"); err != nil {
-		return nil, fmt.Errorf("failed to set BPF filter: %w", err)
+		return nil, err
 	}
 
 	sh := newSendHandle(cfg.Interface.HardwareAddr, uint16(cfg.Port), uint8(cfg.PCAP.DSCP))
@@ -102,7 +98,7 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 	return sh, nil
 }
 
-// newSendHandle builds everything but the pcap handle and addresses, so tests
+// newSendHandle builds everything but the device handle and addresses, so tests
 // can exercise the packet-building path without a capture device.
 func newSendHandle(srcMAC net.HardwareAddr, srcPort uint16, dscp uint8) *SendHandle {
 	// MSS: randomize between 1360–1460 once per handle to avoid a static fingerprint
@@ -204,6 +200,7 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 	e := h.ePool.Get().(*encoder)
 	defer func() {
 		e.buf.Clear()
+		e.payload = nil
 		h.ePool.Put(e)
 	}()
 
@@ -228,16 +225,18 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 	}
 
 	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
-	if err := gopacket.SerializeLayers(e.buf, opts, &e.eth, ipLayer, &e.tcp, gopacket.Payload(payload)); err != nil {
+	e.payload = payload
+	if err := gopacket.SerializeLayers(e.buf, opts, &e.eth, ipLayer, &e.tcp, &e.payload); err != nil {
 		return err
 	}
 
 	return h.sendPacket(e.buf.Bytes())
 }
 
-// sendPacket writes one serialized frame to the pcap handle.
+// sendPacket writes one serialized frame to the device.
 //
-// pcap_sendpacket is not guaranteed thread-safe, and gopacket's write path adds
+// On a pcap handle (every OS but Linux), pcap_sendpacket is not guaranteed
+// thread-safe, and gopacket's write path adds
 // no protection of its own: Handle.WritePacketData calls pcap_sendpacket with
 // the raw handle pointer, taking no lock and never checking whether the handle
 // is still open. Its read path does both, which is why only sends need this.
@@ -284,7 +283,7 @@ func (h *SendHandle) deleteClientTCPF(addr net.Addr) {
 	h.tcpF.mu.Unlock()
 }
 
-// Close shuts down the pcap handle. It is safe to call concurrently with Write
+// Close shuts down the device handle. It is safe to call concurrently with Write
 // and safe to call more than once.
 func (h *SendHandle) Close() {
 	h.writeMu.Lock()

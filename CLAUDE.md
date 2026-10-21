@@ -25,7 +25,7 @@ CGO_ENABLED=1 go test -race ./internal/socket/            # race-sensitive packe
 go vet ./...
 ```
 
-- Tests live in `internal/client`, `internal/conf`, `internal/protocol`, `internal/server` and `internal/socket`; the rest is exercised via the binary.
+- Tests live in `internal/client`, `internal/conf`, `internal/protocol`, `internal/server` and `internal/socket`; the rest is exercised via the binary. The socket loopback tests and benchmarks (`afpacket_linux_test.go`) need root on Linux and skip otherwise.
 - **Windows hosts cannot build directly** (CGO+libpcap, cross-compile is painful). Build on Linux (native, WSL, or Docker). Windows uses Npcap + MinGW.
 - **Release binaries** are static, multi-arch (linux amd64/arm64/arm32/mips*, windows, darwin) built by `.github/workflows/build-release.yml`: Linux targets build **inside `muslcc/x86_64:*` Docker containers**, compiling a **static libpcap with musl** and linking via `-linkmode external -extldflags '-static'`, and injects build metadata with `-ldflags "-X 'paqet/cmd/version.Version=...'"` (also `GitCommit`, `GitTag`, `BuildTime`). Reproduce that recipe for production binaries, not a plain `go build`.
 
@@ -45,7 +45,7 @@ sudo iptables -t mangle -A OUTPUT     -p tcp --sport <port> --tcp-flags RST RST 
 
 A connection is assembled bottom-up; understanding paqet means following this layering across packages:
 
-1. **`internal/socket`** — `PacketConn` (implements `net.PacketConn`) backed by pcap. `send_handle.go` crafts raw TCP frames (randomized MSS/TTL/window/timestamps for fingerprint evasion); `recv_handle.go` reads them via a BPF filter (`tcp and dst port N`) using a zero-alloc `DecodingLayerParser`. This is the disguised "wire."
+1. **`internal/socket`** — `PacketConn` (implements `net.PacketConn`). `send_handle.go` crafts raw TCP frames (randomized MSS/TTL/window/timestamps for fingerprint evasion); `recv_handle.go` reads them via a BPF filter (`tcp and dst port N`) using a zero-alloc `DecodingLayerParser`. The device below is per-OS: on Linux `handle_linux.go` uses raw AF_PACKET sockets (a protocol-0 send socket that captures nothing; a receive socket with `PACKET_IGNORE_OUTGOING` and batched `recvmmsg` in Go's netpoller; libpcap only compiles the filter), elsewhere `handle.go` uses pcap handles. This is the disguised "wire."
 2. **`internal/tnet/kcp`** — wraps `PacketConn` in KCP (`xtaci/kcp-go`, with encryption `cfg.Block` + optional FEC `dshard`/`pshard`), then layers `smux` stream multiplexing on top. `dial.go` = client side, `listen.go` = server side, `kcp.go` = per-mode KCP tuning (`aplConf`) + smux config (`smuxConf`). Window sizes are set once per session from config — there is deliberately no runtime window controller (see `ticker.go`).
 3. **`internal/tnet`** — transport-agnostic abstractions: `Conn`, `Listener`, `Addr`, `strm`.
 4. **`internal/protocol`** — per-smux-stream framing: a type byte (`PPING`/`PPONG`/`PTCPF`/`PTCP`/`PUDP`) + target `Addr` + TCP-flag config. This is how each stream declares what it carries.

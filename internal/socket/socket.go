@@ -98,14 +98,13 @@ func (c *PacketConn) LocalAddr() net.Addr {
 }
 
 func (c *PacketConn) SetDeadline(t time.Time) error {
-	c.readDeadline.Store(t)
 	c.writeDeadline.Store(t)
-	return nil
+	return c.SetReadDeadline(t)
 }
 
 func (c *PacketConn) SetReadDeadline(t time.Time) error {
 	c.readDeadline.Store(t)
-	return nil
+	return c.recvHandle.SetReadDeadline(t)
 }
 
 func (c *PacketConn) SetWriteDeadline(t time.Time) error {

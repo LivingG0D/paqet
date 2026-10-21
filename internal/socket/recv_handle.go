@@ -3,17 +3,23 @@ package socket
 import (
 	"fmt"
 	"net"
-	"runtime"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
-	"github.com/gopacket/gopacket/pcap"
 
 	"paqet/internal/conf"
 )
+
+// frameReader returns the next Ethernet frame, valid until the following call:
+// a pcap handle, or on Linux a raw packet socket (handle_linux.go).
+type frameReader interface {
+	ReadFrame() ([]byte, error)
+	SetReadDeadline(t time.Time) error
+	Close()
+}
 
 type decoder struct {
 	parser  *gopacket.DecodingLayerParser
@@ -25,37 +31,26 @@ type decoder struct {
 }
 
 type RecvHandle struct {
-	handle *pcap.Handle
-	dPool  sync.Pool
-	mu     sync.Mutex
+	handle frameReader
+	mu     sync.Mutex // serializes Read: the frame and dec are reused for every packet
+	dec    decoder
+	src    *net.UDPAddr // last sender, guarded by mu
+}
+
+func recvFilter(port int) string {
+	return fmt.Sprintf("tcp and dst port %d", port)
 }
 
 func NewRecvHandle(cfg *conf.Network) (*RecvHandle, error) {
-	handle, err := newHandle(cfg, cfg.PCAP.Sockbuf, cfg.PCAP.SnapLen, 100*time.Millisecond)
+	handle, err := openRecvHandle(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open pcap handle: %w", err)
-	}
-
-	// SetDirection is not fully supported on Windows Npcap, so skip it
-	if runtime.GOOS != "windows" {
-		if err := handle.SetDirection(pcap.DirectionIn); err != nil {
-			return nil, fmt.Errorf("failed to set pcap direction in: %v", err)
-		}
-	}
-
-	filter := fmt.Sprintf("tcp and dst port %d", cfg.Port)
-	if err := handle.SetBPFFilter(filter); err != nil {
-		return nil, fmt.Errorf("failed to set BPF filter: %w", err)
+		return nil, err
 	}
 
 	h := &RecvHandle{handle: handle}
-	h.dPool.New = func() any {
-		d := &decoder{decoded: make([]gopacket.LayerType, 0, 4)}
-		d.parser = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &d.eth, &d.ip4, &d.ip6, &d.tcp)
-		d.parser.IgnoreUnsupported = true
-		return d
-	}
-
+	h.dec.decoded = make([]gopacket.LayerType, 0, 4)
+	h.dec.parser = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &h.dec.eth, &h.dec.ip4, &h.dec.ip6, &h.dec.tcp)
+	h.dec.parser.IgnoreUnsupported = true
 	return h, nil
 }
 
@@ -63,45 +58,50 @@ func (h *RecvHandle) Read(data []byte) (int, net.Addr, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	zdata, _, err := h.handle.ZeroCopyReadPacketData()
+	frame, err := h.handle.ReadFrame()
 	if err != nil {
 		return 0, nil, err
 	}
 
-	d := h.dPool.Get().(*decoder)
-	defer h.dPool.Put(d)
-
-	if err := d.parser.DecodeLayers(zdata, &d.decoded); err != nil {
+	d := &h.dec
+	if err := d.parser.DecodeLayers(frame, &d.decoded); err != nil {
 		return 0, nil, errNoPayload
 	}
 
-	addr := &net.UDPAddr{}
+	var srcIP net.IP
+	var srcPort int
 	var payload []byte
 	for _, t := range d.decoded {
 		switch t {
 		case layers.LayerTypeIPv4:
-			addr.IP = slices.Clone(d.ip4.SrcIP)
+			srcIP = d.ip4.SrcIP
 		case layers.LayerTypeIPv6:
-			addr.IP = slices.Clone(d.ip6.SrcIP)
+			srcIP = d.ip6.SrcIP
 		case layers.LayerTypeTCP:
-			addr.Port = int(d.tcp.SrcPort)
+			srcPort = int(d.tcp.SrcPort)
 			payload = d.tcp.Payload
 		}
 	}
 
-	if addr.IP == nil || len(payload) == 0 {
+	if srcIP == nil || len(payload) == 0 {
 		return 0, nil, errNoPayload
 	}
 
-	return copy(data, payload), addr, nil
+	// Hand out the previous address while the sender is unchanged: callers only
+	// read it, and a client receives everything from one server. srcIP points
+	// into the frame buffer, so a new address needs its own copy.
+	if h.src == nil || h.src.Port != srcPort || !h.src.IP.Equal(srcIP) {
+		h.src = &net.UDPAddr{IP: slices.Clone(srcIP), Port: srcPort}
+	}
+	return copy(data, payload), h.src, nil
 }
 
+func (h *RecvHandle) SetReadDeadline(t time.Time) error {
+	return h.handle.SetReadDeadline(t)
+}
+
+// Close does not take mu: a Read may be blocked holding it, and closing the
+// handle is what wakes that Read.
 func (h *RecvHandle) Close() {
-	// Read copies out of pcap's buffer after gopacket drops its own lock; holding mu keeps
-	// handle.Close from freeing that buffer mid-copy. The 100ms read timeout bounds the wait.
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.handle != nil {
-		h.handle.Close()
-	}
+	h.handle.Close()
 }
