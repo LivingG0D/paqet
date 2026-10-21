@@ -2,6 +2,7 @@ package conf
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"time"
 
@@ -65,7 +66,7 @@ func (k *KCP) setDefaults(role string) {
 	// Users can enable FEC by setting dshard/pshard in config (e.g. dshard: 10, pshard: 1).
 
 	if k.Block_ == "" {
-		k.Block_ = "salsa20" // Stream cipher — best DPI bypass, no block padding artifacts
+		k.Block_ = "aes-128-gcm" // AEAD: the other ciphers only carry a CRC32, which an on-path box can forge
 	}
 
 	if k.Smuxbuf == 0 {
@@ -120,6 +121,13 @@ func (k *KCP) validate() []error {
 	}
 	if k.Streambuf < 1024 {
 		errors = append(errors, fmt.Errorf("KCP streambuf must be >= 1024 bytes"))
+	}
+	// smux rejects these at connect time, which would fail every session
+	if k.Streambuf > k.Smuxbuf || k.Smuxbuf > math.MaxInt32 {
+		errors = append(errors, fmt.Errorf("KCP streambuf (%d) must be <= smuxbuf (%d) <= %d", k.Streambuf, k.Smuxbuf, math.MaxInt32))
+	}
+	if k.Smuxkalive_ < 1 || k.Smuxkalive_ > k.Smuxktimeout_ {
+		errors = append(errors, fmt.Errorf("KCP smuxkalive (%d) must be between 1 and smuxktimeout (%d)", k.Smuxkalive_, k.Smuxktimeout_))
 	}
 
 	k.Smuxkalive = time.Duration(k.Smuxkalive_) * time.Second

@@ -54,7 +54,8 @@ var Cmd = &cobra.Command{
 		}
 		defer packetConn.Close()
 
-		log.Printf("listening for packets on :%d, (Press Ctrl+C to exit)", cfg.Listen.Addr.Port)
+		dstAddr := &net.UDPAddr{Port: cfg.Network.Port}
+		log.Printf("listening for packets on :%d, (Press Ctrl+C to exit)", cfg.Network.Port)
 
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -75,7 +76,7 @@ var Cmd = &cobra.Command{
 						log.Printf("failed to read from socket: %v", err)
 						continue
 					}
-					go handlePacket(srcAddr, cfg.Listen.Addr, payload[:n])
+					go handlePacket(srcAddr, dstAddr, payload[:n])
 				}
 			}
 		}()

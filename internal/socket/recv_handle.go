@@ -97,6 +97,10 @@ func (h *RecvHandle) Read(data []byte) (int, net.Addr, error) {
 }
 
 func (h *RecvHandle) Close() {
+	// Read copies out of pcap's buffer after gopacket drops its own lock; holding mu keeps
+	// handle.Close from freeing that buffer mid-copy. The 100ms read timeout bounds the wait.
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.handle != nil {
 		h.handle.Close()
 	}

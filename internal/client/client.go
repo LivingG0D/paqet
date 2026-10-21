@@ -28,6 +28,10 @@ func New(cfg *conf.Conf) (*Client, error) {
 		minConns: cfg.Transport.Conn,
 		maxConns: cfg.Transport.Conn * 2,
 	}
+	// A fixed source port can carry one session: the server resets it when a second conv appears.
+	if cfg.Network.Port != 0 {
+		c.maxConns = c.minConns
+	}
 	return c, nil
 }
 

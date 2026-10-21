@@ -95,11 +95,6 @@ func (c *PacketConn) Close() error {
 
 func (c *PacketConn) LocalAddr() net.Addr {
 	return nil
-	// return &net.UDPAddr{
-	// 	IP:   append([]byte(nil), c.cfg.PrimaryAddr().IP...),
-	// 	Port: c.cfg.PrimaryAddr().Port,
-	// 	Zone: c.cfg.PrimaryAddr().Zone,
-	// }
 }
 
 func (c *PacketConn) SetDeadline(t time.Time) error {
@@ -115,10 +110,6 @@ func (c *PacketConn) SetReadDeadline(t time.Time) error {
 
 func (c *PacketConn) SetWriteDeadline(t time.Time) error {
 	c.writeDeadline.Store(t)
-	return nil
-}
-
-func (c *PacketConn) SetDSCP(dscp int) error {
 	return nil
 }
 

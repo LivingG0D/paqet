@@ -84,12 +84,10 @@ Configuration uses YAML. See the [`example/`](example/) directory for complete a
 role: "server"
 log:
   level: "info"
-listen:
-  addr: ":9999"
 network:
   interface: "eth0"
   ipv4:
-    addr: "10.0.0.100:9999"
+    addr: "10.0.0.100:9999"    # the server listens on this port
     router_mac: "aa:bb:cc:dd:ee:ff"
   pcap:
     sockbuf: 8388608           # 8MB buffer (bytes)
@@ -100,7 +98,7 @@ transport:
     mode: "fast"               # normal, fast, fast2, fast3, manual
     mtu: 1350
     key: "your-secret-key"
-    block: "aes"               # aes, xor, salsa20, blowfish, none, etc.
+    block: "aes-128-gcm"       # default; must match the client
 ```
 
 ### Client
@@ -124,7 +122,7 @@ transport:
   kcp:
     mode: "fast"
     key: "your-secret-key"
-    block: "aes"
+    block: "aes-128-gcm"
 ```
 
 ### Server Firewall (Required)
@@ -137,7 +135,7 @@ sudo iptables -t raw -A OUTPUT -p tcp --sport 9999 -j NOTRACK
 sudo iptables -t mangle -A OUTPUT -p tcp --sport 9999 --tcp-flags RST RST -j DROP
 ```
 
-Replace `9999` with your listen port.
+Replace `9999` with the port in `network.ipv4.addr`.
 
 ## CLI Commands
 
@@ -163,7 +161,9 @@ Replace `9999` with your listen port.
 
 `aes` · `aes-128` · `aes-128-gcm` · `aes-192` · `salsa20` · `blowfish` · `twofish` · `cast5` · `3des` · `tea` · `xtea` · `xor` · `sm4` · `none`
 
-> **Tip:** Use `xor` for minimal CPU overhead with basic obfuscation, or `aes` for strong encryption.
+> **Upgrading:** the default cipher changed from `salsa20` to `aes-128-gcm`. A config without an explicit `block:` must pin `block: "salsa20"` (or both ends must upgrade together), otherwise the two ends silently drop each other's packets. The installer's update option pins it for you.
+
+> **Tip:** The default `aes-128-gcm` is the only option that also detects tampering; the others only carry a CRC32 that an on-path attacker can forge. Use `xor` only for minimal CPU overhead with basic obfuscation.
 
 ## Upgrading from paqet2
 

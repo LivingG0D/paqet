@@ -44,16 +44,3 @@ func validateHostPort(addr string, vPort bool) error {
 
 	return nil
 }
-
-// func validateMAC(mac string) (net.HardwareAddr, error) {
-// 	if mac == "" {
-// 		return nil, fmt.Errorf("MAC address is required")
-// 	}
-
-// 	hwAddr, err := net.ParseMAC(mac)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("invalid MAC address '%s': %v", mac, err)
-// 	}
-
-// 	return hwAddr, nil
-// }

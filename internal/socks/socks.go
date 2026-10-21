@@ -43,7 +43,7 @@ func (s *Server) serveTCP(ctx context.Context, listener net.Listener) {
 			select {
 			case <-ctx.Done():
 				return
-			default:
+			case <-time.After(100 * time.Millisecond): // e.g. EMFILE: back off instead of spinning
 				continue
 			}
 		}

@@ -126,8 +126,8 @@ tune_performance() { # KCP mode, MTU, connection pool, pcap buffer, encryption; 
   conn=$(printf '%s' "$REPLY" | tr -cd '[:digit:]')
   ask "PCAP buffer (MB) [e.g. 16] (Enter = keep): "
   buf=$(printf '%s' "$REPLY" | tr -cd '[:digit:]')
-  ask "Encryption [salsa20/xor/aes/...] (Enter = keep): "
-  crypt=$(printf '%s' "$REPLY" | tr -cd '[:alnum:]')
+  ask "Encryption [aes-128-gcm/salsa20/xor/aes/...] (must match the other side, Enter = keep): "
+  crypt=$(printf '%s' "$REPLY" | tr -cd '[:alnum:]-') # keep '-' for aes-128-gcm
 
   if [ -n "$mode" ]; then
     if grep -q 'mode:' "$CONFIG_FILE"; then

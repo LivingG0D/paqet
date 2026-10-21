@@ -13,7 +13,6 @@ import (
 type Conf struct {
 	Role      string    `yaml:"role"`
 	Log       Log       `yaml:"log"`
-	Listen    Server    `yaml:"listen"`
 	SOCKS5    []SOCKS5  `yaml:"socks5"`
 	Forward   []Forward `yaml:"forward"`
 	Network   Network   `yaml:"network"`
@@ -48,7 +47,6 @@ func LoadFromFile(path string) (*Conf, error) {
 
 func (c *Conf) setDefaults() {
 	c.Log.setDefaults()
-	c.Listen.setDefaults()
 	for i := range c.SOCKS5 {
 		c.SOCKS5[i].setDefaults()
 	}
@@ -83,8 +81,11 @@ func (c *Conf) validate() error {
 
 	allErrors = append(allErrors, c.Network.validate()...)
 	allErrors = append(allErrors, c.Transport.validate()...)
+	// The server listens on the network.ipv4/ipv6 port; an old top-level "listen:" block is ignored.
 	if c.Role == "server" {
-		allErrors = append(allErrors, c.Listen.validate()...)
+		if c.Network.Port == 0 {
+			allErrors = append(allErrors, fmt.Errorf("server needs a fixed port in network ipv4/ipv6 addr"))
+		}
 	} else {
 		allErrors = append(allErrors, c.Server.validate()...)
 		if c.Server.Addr != nil {

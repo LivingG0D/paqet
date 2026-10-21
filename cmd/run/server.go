@@ -22,6 +22,10 @@ func startServer(cfg *conf.Conf) {
 		log.Fatalf("server encountered an error: %v", err)
 	}
 
-	<-ctx.Done()
-	log.Printf("shutdown signal received, shutting down...")
+	select {
+	case <-ctx.Done():
+		log.Printf("shutdown signal received, shutting down...")
+	case err := <-server.Done():
+		log.Fatalf("server stopped accepting connections: %v", err)
+	}
 }

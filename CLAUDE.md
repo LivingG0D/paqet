@@ -25,7 +25,7 @@ CGO_ENABLED=1 go test -race ./internal/socket/            # race-sensitive packe
 go vet ./...
 ```
 
-- Only `internal/protocol` and `internal/socket` carry tests; everything else is exercised via the binary.
+- Tests live in `internal/client`, `internal/conf`, `internal/protocol`, `internal/server` and `internal/socket`; the rest is exercised via the binary.
 - **Windows hosts cannot build directly** (CGO+libpcap, cross-compile is painful). Build on Linux (native, WSL, or Docker). Windows uses Npcap + MinGW.
 - **Release binaries** are static, multi-arch (linux amd64/arm64/arm32/mips*, windows, darwin) built by `.github/workflows/build-release.yml`: Linux targets build **inside `muslcc/x86_64:*` Docker containers**, compiling a **static libpcap with musl** and linking via `-linkmode external -extldflags '-static'`, and injects build metadata with `-ldflags "-X 'paqet/cmd/version.Version=...'"` (also `GitCommit`, `GitTag`, `BuildTime`). Reproduce that recipe for production binaries, not a plain `go build`.
 
@@ -57,7 +57,7 @@ A connection is assembled bottom-up; understanding paqet means following this la
 
 ## Configuration
 
-`internal/conf` loads YAML into per-section structs (`network`, `pcap`, `kcp`, `transport`, `socks`, `forward`, `server`, `listen`, `log`), each with `setDefaults` + `validate`. Annotated examples live in `example/`. Fork defaults are DPI-tuned: `salsa20` cipher, smux keepalive 30s/90s, FEC off (`dshard:10 pshard:1` when enabled), conservative buffers. KCP `block` cipher and `key` must match on both ends; FEC settings must match too (they change the packet format).
+`internal/conf` loads YAML into per-section structs (`network`, `pcap`, `kcp`, `transport`, `socks`, `forward`, `server`, `log`), each with `setDefaults` + `validate`. The server listens on the `network.ipv4/ipv6` port; there is no `listen` section. Annotated examples live in `example/`. Fork defaults: `aes-128-gcm` cipher (the only block with tamper detection), smux keepalive 30s/90s, FEC off (`dshard:10 pshard:1` when enabled), conservative buffers. KCP `block` cipher and `key` must match on both ends; FEC settings must match too (they change the packet format).
 
 ## Fork specifics & upstream sync
 

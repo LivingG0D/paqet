@@ -66,13 +66,16 @@ migrate_config() {
   if grep -q 'protocol: "kcp"' "$f" && ! grep -q 'conn:' "$f"; then
     sed -i '/protocol: "kcp"/a \  conn: 8' "$f"
   fi
-  # Standard tuning, the same a fresh wizard run would write.
-  sed -i -e 's/conn: .*/conn: 8/' -e 's/block: .*/block: "salsa20"/' -e 's/mtu: .*/mtu: 1250/' \
+  # Standard tuning, the same a fresh wizard run would write. block is kept: both ends must match.
+  sed -i -e 's/conn: .*/conn: 8/' -e 's/mtu: .*/mtu: 1250/' \
     -e 's/sockbuf: .*/sockbuf: 16777216/' "$f"
+  # Pin the old default for configs that never set block, or the new default (aes-128-gcm) would
+  # make this end silently drop every packet from a peer still on salsa20.
+  grep -qE '^[[:space:]]*block:' "$f" || sed -i '/^[[:space:]]*kcp:/a \    block: "salsa20"' "$f"
   sed -i -e '/^\s*dshard:/d' -e '/^\s*pshard:/d' "$f"
-  sed -i '/block:/a\    dshard: 0\n    pshard: 0' "$f"
+  sed -i '/^[[:space:]]*block:/a\    dshard: 0\n    pshard: 0' "$f"
   chmod 600 "$f" "$f.bak" 2>/dev/null || true
-  good "Config migrated: salsa20, conn 8, MTU 1250, FEC off, 16 MB buffer."
+  good "Config migrated: cipher unchanged, conn 8, MTU 1250, FEC off, 16 MB buffer."
 }
 
 if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN_NAME" ]; then
@@ -266,12 +269,13 @@ else
 
   say ""
   say "${Y}Encryption${N}: both sides must pick the same."
-  say "  salsa20                       Salsa20 stream cipher, no padding (default, best DPI bypass)"
+  say "  aes-128-gcm                   AES-GCM: encrypts and detects tampering (default)"
+  say "  salsa20                       Salsa20 stream cipher, no padding; does not detect tampering"
   say "  xor                           XOR, minimal CPU, basic header obfuscation"
   say "  none                          no encryption; use when the outer tunnel already encrypts"
-  say "  aes, aes-128, aes-192, aes-128-gcm   AES, hardware-accelerated"
+  say "  aes, aes-128, aes-192         AES, hardware-accelerated"
   say "  sm4, blowfish, twofish, cast5, 3des, tea, xtea, null"
-  ask "Encryption (Enter = salsa20): " salsa20
+  ask "Encryption (Enter = aes-128-gcm): " aes-128-gcm
   KCP_BLOCK=$REPLY
 
   if yes_no "FEC: 10% overhead, recovers packet loss (recommended only on lossy links) [y/N] " n; then
@@ -291,8 +295,6 @@ else
 role: "server"
 log:
   level: "info"
-listen:
-  addr: ":$PORT"
 network:
   interface: "$CFG_IFACE"
   ipv4:
