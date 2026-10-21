@@ -2,8 +2,8 @@ package client
 
 import (
 	"context"
-	"paqet/internal/flog"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/tnet"
 	"time"
 )
 

@@ -120,23 +120,23 @@ jobs:
                   go build -v -a -trimpath \
                     -gcflags "${GCFLAGS}" \
                     -ldflags "-s -w -buildid= -linkmode external -extldflags '-static' \
-                    -X 'paqet/cmd/version.Version=${VERSION}' \
-                    -X 'paqet/cmd/version.GitCommit=${GIT_COMMIT}' \
-                    -X 'paqet/cmd/version.GitTag=${GIT_TAG}' \
-                    -X 'paqet/cmd/version.BuildTime=${BUILD_TIME}'" \
-                    -o paqet_linux_${FILENAME} ./cmd/main.go
+                    -X 'paqet-plus/cmd/version.Version=${VERSION}' \
+                    -X 'paqet-plus/cmd/version.GitCommit=${GIT_COMMIT}' \
+                    -X 'paqet-plus/cmd/version.GitTag=${GIT_TAG}' \
+                    -X 'paqet-plus/cmd/version.BuildTime=${BUILD_TIME}'" \
+                    -o paqet-plus_linux_${FILENAME} ./cmd/main.go
 
-                  chmod +x paqet_linux_${FILENAME}
-                  tar -czvf dist/paqet-linux-${FILENAME}-${VERSION}.tar.gz \
-                    paqet_linux_${FILENAME} README.md \
+                  chmod +x paqet-plus_linux_${FILENAME}
+                  tar -czvf dist/paqet-plus-linux-${FILENAME}-${VERSION}.tar.gz \
+                    paqet-plus_linux_${FILENAME} README.md \
                     example/client.yaml.example example/server.yaml.example
                   EOF
 
             - name: Upload Artifact
               uses: actions/upload-artifact@v7
               with:
-                  name: paqet-linux-${{ matrix.filename }}
-                  path: dist/paqet-linux-${{ matrix.filename }}-${{ steps.ref_id.outputs.ref }}.tar.gz
+                  name: paqet-plus-linux-${{ matrix.filename }}
+                  path: dist/paqet-plus-linux-${{ matrix.filename }}-${{ steps.ref_id.outputs.ref }}.tar.gz
                   retention-days: 7
 
     build-windows:
@@ -188,14 +188,14 @@ jobs:
                   go build -v -a -trimpath \
                     -gcflags "all=-l=4" \
                     -ldflags "-s -w -buildid= \
-                    -X 'paqet/cmd/version.Version=${VERSION}' \
-                    -X 'paqet/cmd/version.GitCommit=${GIT_COMMIT}' \
-                    -X 'paqet/cmd/version.GitTag=${GIT_TAG}' \
-                    -X 'paqet/cmd/version.BuildTime=${BUILD_TIME}'" \
-                    -o paqet_windows_${{ matrix.goarch }}.exe ./cmd/main.go
+                    -X 'paqet-plus/cmd/version.Version=${VERSION}' \
+                    -X 'paqet-plus/cmd/version.GitCommit=${GIT_COMMIT}' \
+                    -X 'paqet-plus/cmd/version.GitTag=${GIT_TAG}' \
+                    -X 'paqet-plus/cmd/version.BuildTime=${BUILD_TIME}'" \
+                    -o paqet-plus_windows_${{ matrix.goarch }}.exe ./cmd/main.go
 
-                  7z a -tzip dist/paqet-windows-${{ matrix.goarch }}-${{ steps.ref_id.outputs.ref }}.zip \
-                    paqet_windows_${{ matrix.goarch }}.exe \
+                  7z a -tzip dist/paqet-plus-windows-${{ matrix.goarch }}-${{ steps.ref_id.outputs.ref }}.zip \
+                    paqet-plus_windows_${{ matrix.goarch }}.exe \
                     README.md \
                     example/client.yaml.example \
                     example/server.yaml.example
@@ -203,8 +203,8 @@ jobs:
             - name: Upload Artifact
               uses: actions/upload-artifact@v7
               with:
-                  name: paqet-windows-${{ matrix.goarch }}
-                  path: dist/paqet-windows-${{ matrix.goarch }}-${{ steps.ref_id.outputs.ref }}.zip
+                  name: paqet-plus-windows-${{ matrix.goarch }}
+                  path: dist/paqet-plus-windows-${{ matrix.goarch }}-${{ steps.ref_id.outputs.ref }}.zip
                   retention-days: 7
 
     build-darwin:
@@ -247,15 +247,15 @@ jobs:
                   go build -v -a -trimpath \
                     -gcflags "all=-l=4" \
                     -ldflags "-s -w -buildid= \
-                    -X 'paqet/cmd/version.Version=${VERSION}' \
-                    -X 'paqet/cmd/version.GitCommit=${GIT_COMMIT}' \
-                    -X 'paqet/cmd/version.GitTag=${GIT_TAG}' \
-                    -X 'paqet/cmd/version.BuildTime=${BUILD_TIME}'" \
-                    -o paqet_darwin_${{ matrix.goarch }} ./cmd/main.go
+                    -X 'paqet-plus/cmd/version.Version=${VERSION}' \
+                    -X 'paqet-plus/cmd/version.GitCommit=${GIT_COMMIT}' \
+                    -X 'paqet-plus/cmd/version.GitTag=${GIT_TAG}' \
+                    -X 'paqet-plus/cmd/version.BuildTime=${BUILD_TIME}'" \
+                    -o paqet-plus_darwin_${{ matrix.goarch }} ./cmd/main.go
 
-                  chmod +x paqet_darwin_${{ matrix.goarch }}
-                  tar -czvf dist/paqet-darwin-${{ matrix.goarch }}-${{ steps.ref_id.outputs.ref }}.tar.gz \
-                    paqet_darwin_${{ matrix.goarch }} \
+                  chmod +x paqet-plus_darwin_${{ matrix.goarch }}
+                  tar -czvf dist/paqet-plus-darwin-${{ matrix.goarch }}-${{ steps.ref_id.outputs.ref }}.tar.gz \
+                    paqet-plus_darwin_${{ matrix.goarch }} \
                     README.md \
                     example/client.yaml.example \
                     example/server.yaml.example
@@ -263,8 +263,8 @@ jobs:
             - name: Upload Artifact
               uses: actions/upload-artifact@v7
               with:
-                  name: paqet-darwin-${{ matrix.goarch }}
-                  path: dist/paqet-darwin-${{ matrix.goarch }}-${{ steps.ref_id.outputs.ref }}.tar.gz
+                  name: paqet-plus-darwin-${{ matrix.goarch }}
+                  path: dist/paqet-plus-darwin-${{ matrix.goarch }}-${{ steps.ref_id.outputs.ref }}.tar.gz
                   retention-days: 7
 
     release:
@@ -276,7 +276,7 @@ jobs:
               uses: actions/download-artifact@v8
               with:
                   path: ./dist
-                  pattern: paqet-*
+                  pattern: paqet-plus-*
                   merge-multiple: true
 
             - name: Create Release

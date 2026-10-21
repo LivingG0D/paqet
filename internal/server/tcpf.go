@@ -1,8 +1,8 @@
 package server
 
 import (
-	"paqet/internal/protocol"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/protocol"
+	"paqet-plus/internal/tnet"
 )
 
 func (s *Server) handleTCPF(strm tnet.Strm, p *protocol.Proto) {

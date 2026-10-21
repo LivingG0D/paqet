@@ -3,10 +3,10 @@ package client
 import (
 	"context"
 
-	"paqet/internal/flog"
-	"paqet/internal/pkg/hash"
-	"paqet/internal/protocol"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/pkg/hash"
+	"paqet-plus/internal/protocol"
+	"paqet-plus/internal/tnet"
 )
 
 func (c *Client) UDP(ctx context.Context, lAddr, tAddr string) (tnet.Strm, bool, uint64, error) {

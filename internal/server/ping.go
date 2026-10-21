@@ -1,9 +1,9 @@
 package server
 
 import (
-	"paqet/internal/flog"
-	"paqet/internal/protocol"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/protocol"
+	"paqet-plus/internal/tnet"
 )
 
 func (s *Server) handlePing(strm tnet.Strm) {

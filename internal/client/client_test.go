@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"paqet/internal/conf"
-	"paqet/internal/pkg/iterator"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/pkg/iterator"
+	"paqet-plus/internal/tnet"
 )
 
 // stubConn is a no-op tnet.Conn that records whether Close was called. The

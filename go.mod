@@ -1,4 +1,4 @@
-module paqet
+module paqet-plus
 
 go 1.27
 

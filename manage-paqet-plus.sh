@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# paqet-ctl — control panel for paqet (interactive menu).
+# paqet-plus-ctl — control panel for paqet-plus (interactive menu).
 #
-# Installed by setup-paqet.sh as /usr/local/bin/paqet-ctl. Run as root:
-#   sudo paqet-ctl
+# Installed by setup-paqet-plus.sh as /usr/local/bin/paqet-plus-ctl. Run as root:
+#   sudo paqet-plus-ctl
 set -uo pipefail
 
-REPO=LivingG0D/paqet
-BRANCH="${PAQET_BRANCH:-master}"
-INSTALL_DIR=/opt/paqet
-BIN="$INSTALL_DIR/paqet"
+REPO=LivingG0D/paqet-plus
+BRANCH="${PAQET_PLUS_BRANCH:-${PAQET_BRANCH:-master}}"
+INSTALL_DIR=/opt/paqet-plus
+BIN="$INSTALL_DIR/paqet-plus"
 CONFIG_FILE="$INSTALL_DIR/config.yaml"
-SERVICE_NAME=paqet
+SERVICE_NAME=paqet-plus
 
 if [ -t 1 ]; then Y=$'\e[1;33m' G=$'\e[32m' R=$'\e[31m' D=$'\e[2m' N=$'\e[0m'; else Y='' G='' R='' D='' N=''; fi
 
@@ -48,7 +48,7 @@ show_header() {
   local status
   if systemctl is-active -q "$SERVICE_NAME"; then status="${G}running${N}"; else status="${R}stopped${N}"; fi
   say ""
-  say "${Y}=== paqet ===${N}  service: $status, version: $(installed_ver), config: $CONFIG_FILE"
+  say "${Y}=== paqet-plus ===${N}  service: $status, version: $(installed_ver), config: $CONFIG_FILE"
 }
 
 view_logs() { # journalctl -f: everything the service prints
@@ -187,11 +187,11 @@ apply_sysctl() { # raise the kernel UDP buffers (kept in /etc/sysctl.conf)
     say "Cancelled."
     return 0
   fi
-  if grep -q 'paqet optimizations' /etc/sysctl.conf; then
+  if grep -qE 'paqet(-plus)? optimizations' /etc/sysctl.conf; then
     good "Already present in /etc/sysctl.conf"
   else
     cat >> /etc/sysctl.conf <<EOF
-# paqet optimizations
+# paqet-plus optimizations
 net.core.rmem_max=33554432
 net.core.wmem_max=33554432
 net.core.rmem_default=33554432
@@ -204,10 +204,10 @@ EOF
 }
 update_system() { # rerun the installer: it finds the install and takes the update path
   say ""
-  say "${Y}Update${N}: downloads the latest setup-paqet.sh from $REPO ($BRANCH)."
+  say "${Y}Update${N}: downloads the latest setup-paqet-plus.sh from $REPO ($BRANCH)."
   say "${D}The installer keeps the existing config.${N}"
   if yes_no "Continue? [y/N] " n; then
-    curl -fsSL "https://raw.githubusercontent.com/$REPO/$BRANCH/setup-paqet.sh" | bash
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/$BRANCH/setup-paqet-plus.sh" | bash
     good "Update finished. Reloading the control panel..."
     exec "$0"
   else
@@ -216,7 +216,7 @@ update_system() { # rerun the installer: it finds the install and takes the upda
 }
 
 main() {
-  [ "$(id -u)" -eq 0 ] || { bad "Run as root: sudo paqet-ctl"; exit 1; }
+  [ "$(id -u)" -eq 0 ] || { bad "Run as root: sudo paqet-plus-ctl"; exit 1; }
   while :; do
     show_header
     say "   1) View logs"
@@ -250,7 +250,7 @@ main() {
 # `curl … | bash` feeds the script on stdin where the menu needs the keyboard: refuse it and point at
 # `bash <(curl …)`, which keeps the keyboard (the panel itself reads /dev/tty either way).
 if [ -z "${BASH_SOURCE[0]:-}" ]; then
-  bad "Run it as: bash <(curl -fsSL https://raw.githubusercontent.com/$REPO/$BRANCH/manage-paqet.sh)   (not curl | bash)"
+  bad "Run it as: bash <(curl -fsSL https://raw.githubusercontent.com/$REPO/$BRANCH/manage-paqet-plus.sh)   (not curl | bash)"
   exit 1
 elif [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   main "$@"

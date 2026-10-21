@@ -1,4 +1,4 @@
-# paqet Server Configuration Example  
+# paqet-plus Server Configuration Example  
 # Role must be explicitly set
 role: "server"
 
@@ -99,7 +99,7 @@ transport:
 
 # Important: Server Firewall Configuration Required!
 # 
-# Since paqet uses pcap to bypass standard firewalls, you MUST configure
+# Since paqet-plus uses raw packets to bypass standard firewalls, you MUST configure
 # iptables on the server to prevent kernel interference:
 #
 # sudo iptables -t raw -A PREROUTING -p tcp --dport 9999 -j NOTRACK

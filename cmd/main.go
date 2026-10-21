@@ -5,17 +5,17 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"paqet/cmd/dump"
-	"paqet/cmd/ping"
-	"paqet/cmd/run"
-	"paqet/cmd/secret"
-	"paqet/cmd/version"
+	"paqet-plus/cmd/dump"
+	"paqet-plus/cmd/ping"
+	"paqet-plus/cmd/run"
+	"paqet-plus/cmd/secret"
+	"paqet-plus/cmd/version"
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "paqet",
+	Use:   "paqet-plus",
 	Short: "KCP transport over raw TCP packet",
-	Long:  `paqet is a bidirectional packet-level proxy using KCP and raw socket transport with encryption.`,
+	Long:  `paqet-plus is a bidirectional packet-level proxy using KCP and raw socket transport with encryption.`,
 }
 
 func main() {

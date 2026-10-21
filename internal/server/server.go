@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"paqet/internal/conf"
-	"paqet/internal/flog"
-	"paqet/internal/tnet"
-	"paqet/internal/tnet/kcp"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/tnet"
+	"paqet-plus/internal/tnet/kcp"
 	"time"
 )
 

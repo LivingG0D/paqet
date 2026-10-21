@@ -7,8 +7,8 @@ import (
 	"net/netip"
 	"sync"
 
-	"paqet/internal/client"
-	"paqet/internal/flog"
+	"paqet-plus/internal/client"
+	"paqet-plus/internal/flog"
 )
 
 type Forward struct {

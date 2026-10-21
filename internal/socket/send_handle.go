@@ -11,9 +11,9 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 
-	"paqet/internal/conf"
-	"paqet/internal/pkg/hash"
-	"paqet/internal/pkg/iterator"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/pkg/hash"
+	"paqet-plus/internal/pkg/iterator"
 )
 
 // frameWriter sends one complete Ethernet frame: a pcap handle, or on Linux a

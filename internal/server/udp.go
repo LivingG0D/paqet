@@ -5,10 +5,10 @@ import (
 	"net"
 	"time"
 
-	"paqet/internal/flog"
-	"paqet/internal/pkg/buffer"
-	"paqet/internal/protocol"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/pkg/buffer"
+	"paqet-plus/internal/protocol"
+	"paqet-plus/internal/tnet"
 )
 
 func (s *Server) handleUDPProtocol(ctx context.Context, strm tnet.Strm, p *protocol.Proto) {

@@ -5,8 +5,8 @@ import (
 	"net"
 	"time"
 
-	"paqet/internal/flog"
-	"paqet/internal/pkg/buffer"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/pkg/buffer"
 )
 
 func (f *Forward) serveTCP(ctx context.Context, listener net.Listener) {

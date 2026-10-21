@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"paqet/internal/conf"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/tnet"
 )
 
 // lockFree reports whether c.mu can be acquired within d.

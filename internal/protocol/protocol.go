@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"paqet/internal/conf"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/tnet"
 )
 
 type PType = byte

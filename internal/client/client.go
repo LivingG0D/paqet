@@ -4,10 +4,10 @@ import (
 	"context"
 	"sync"
 
-	"paqet/internal/conf"
-	"paqet/internal/flog"
-	"paqet/internal/pkg/iterator"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/pkg/iterator"
+	"paqet-plus/internal/tnet"
 	"time"
 )
 

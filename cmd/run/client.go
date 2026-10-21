@@ -6,10 +6,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"paqet/internal/client"
-	"paqet/internal/conf"
-	"paqet/internal/forward"
-	"paqet/internal/socks"
+	"paqet-plus/internal/client"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/forward"
+	"paqet-plus/internal/socks"
 )
 
 func startClient(cfg *conf.Conf) {

@@ -32,6 +32,8 @@ var blockCrypts = map[string]blockCrypt{
 }
 
 func newBlock(block, key string) (kcp.BlockCrypt, error) {
+	// The salt keeps the original project name: renaming it would change every key,
+	// and nodes would stop decrypting traffic from upstream paqet and older installs.
 	dkey := pbkdf2.Key([]byte(key), []byte("paqet"), 100_000, 32, sha256.New)
 
 	if b, ok := blockCrypts[block]; ok {

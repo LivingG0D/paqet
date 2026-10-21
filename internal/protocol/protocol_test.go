@@ -3,8 +3,8 @@ package protocol
 import (
 	"bytes"
 	"fmt"
-	"paqet/internal/conf"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/tnet"
 	"testing"
 )
 

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"paqet/internal/conf"
+	"paqet-plus/internal/conf"
 
 	"github.com/gopacket/gopacket/layers"
 )

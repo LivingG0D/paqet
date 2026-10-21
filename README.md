@@ -1,10 +1,12 @@
-# paqet (under development, use at your own risk)
+# paqet-plus (under development, use at your own risk)
 
 A bidirectional packet-level proxy that tunnels KCP over raw TCP packets with encryption. Built for environments where standard VPN protocols are blocked or throttled.
 
+paqet-plus is a fork of [paqet](https://github.com/hanselime/paqet) with DPI-evasion tuning, an installer and control panel, connection autoscaling and a lower-CPU Linux packet path. It stays wire-compatible with paqet.
+
 ## How It Works
 
-paqet operates at the packet level using **libpcap** to craft and inject raw TCP frames directly onto the wire, bypassing the kernel's TCP stack. Traffic is multiplexed over [KCP](https://github.com/xtaci/kcp-go) — a fast, reliable ARQ protocol — and wrapped inside what appears to be normal TCP traffic. This approach avoids the signatures that firewalls and DPI systems use to detect tunneling protocols.
+paqet-plus operates at the packet level using **libpcap** to craft and inject raw TCP frames directly onto the wire, bypassing the kernel's TCP stack. Traffic is multiplexed over [KCP](https://github.com/xtaci/kcp-go) — a fast, reliable ARQ protocol — and wrapped inside what appears to be normal TCP traffic. This approach avoids the signatures that firewalls and DPI systems use to detect tunneling protocols.
 
 ```
 Client                                    Server
@@ -31,7 +33,7 @@ Client                                    Server
 One-line installer that downloads the latest release, configures the service, and sets up firewall rules:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LivingG0D/paqet/master/setup-paqet.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/LivingG0D/paqet-plus/master/setup-paqet-plus.sh | sudo bash
 ```
 
 This will:
@@ -40,14 +42,14 @@ This will:
 3. Run an interactive configuration wizard (server or client)
 4. Create a systemd service
 5. Apply iptables rules (server mode)
-6. Install the `paqet-ctl` management tool
+6. Install the `paqet-plus-ctl` management tool
 
 ### Management
 
 After installation, use the control panel:
 
 ```bash
-sudo paqet-ctl
+sudo paqet-plus-ctl
 ```
 
 Options include: view logs, edit config, tune performance (KCP mode, MTU, connections, buffer size, encryption), restart/stop service, update, and apply system optimizations.
@@ -63,15 +65,15 @@ Options include: view logs, edit config, tune performance (KCP mode, MTU, connec
 ### Build from Source
 
 ```bash
-git clone https://github.com/LivingG0D/paqet.git
-cd paqet
-CGO_ENABLED=1 go build -o paqet ./cmd
+git clone https://github.com/LivingG0D/paqet-plus.git
+cd paqet-plus
+CGO_ENABLED=1 go build -o paqet-plus ./cmd
 ```
 
 ### Run
 
 ```bash
-sudo ./paqet run -c config.yaml
+sudo ./paqet-plus run -c config.yaml
 ```
 
 ## Configuration
@@ -141,11 +143,11 @@ Replace `9999` with the port in `network.ipv4.addr`.
 
 | Command | Description |
 |---------|-------------|
-| `paqet run -c config.yaml` | Start the proxy (server or client) |
-| `paqet secret` | Generate a random encryption key |
-| `paqet ping` | Connectivity test |
-| `paqet dump` | Packet capture debug tool |
-| `paqet version` | Show version and build info |
+| `paqet-plus run -c config.yaml` | Start the proxy (server or client) |
+| `paqet-plus secret` | Generate a random encryption key |
+| `paqet-plus ping` | Connectivity test |
+| `paqet-plus dump` | Packet capture debug tool |
+| `paqet-plus version` | Show version and build info |
 
 ## KCP Modes
 
@@ -165,12 +167,14 @@ Replace `9999` with the port in `network.ipv4.addr`.
 
 > **Tip:** The default `aes-128-gcm` is the only option that also detects tampering; the others only carry a CRC32 that an on-path attacker can forge. Use `xor` only for minimal CPU overhead with basic obfuscation.
 
-## Upgrading from paqet2
+## Upgrading from paqet or paqet2
+
+An install made before the rename (`/opt/paqet`, `paqet.service`, `paqet-ctl`) moves itself: the installer, or **Update** in the old `paqet-ctl`, moves it to `/opt/paqet-plus`, `paqet-plus.service` and `paqet-plus-ctl`, keeping the config, backups and service drop-ins.
 
 Servers running the older `paqet2` can upgrade in-place. Run the installer and pick **1) Update** at the first prompt:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LivingG0D/paqet/master/setup-paqet.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/LivingG0D/paqet-plus/master/setup-paqet-plus.sh | sudo bash
 ```
 
 The migration automatically handles:

@@ -6,9 +6,9 @@ import (
 	"net"
 	"time"
 
-	"paqet/internal/client"
-	"paqet/internal/conf"
-	"paqet/internal/flog"
+	"paqet-plus/internal/client"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/flog"
 )
 
 type Server struct {

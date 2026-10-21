@@ -3,9 +3,9 @@ package client
 import (
 	"context"
 
-	"paqet/internal/flog"
-	"paqet/internal/protocol"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/protocol"
+	"paqet-plus/internal/tnet"
 )
 
 func (c *Client) TCP(ctx context.Context, addr string) (tnet.Strm, error) {

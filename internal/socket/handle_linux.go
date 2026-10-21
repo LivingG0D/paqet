@@ -15,11 +15,11 @@ import (
 	"github.com/gopacket/gopacket/pcap"
 	"golang.org/x/sys/unix"
 
-	"paqet/internal/conf"
-	"paqet/internal/flog"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/flog"
 )
 
-// On Linux paqet uses raw AF_PACKET sockets rather than libpcap handles. A send
+// On Linux paqet-plus uses raw AF_PACKET sockets rather than libpcap handles. A send
 // is one write syscall instead of a cgo call into libpcap, and a read waits in
 // Go's netpoller instead of a pcap poll loop that wakes every 100ms per handle.
 

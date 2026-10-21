@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"paqet/internal/conf"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/tnet"
 )
 
 // failingListener mimics kcp-go after a socket read error: every Accept fails at once.

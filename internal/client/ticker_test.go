@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"paqet/internal/conf"
+	"paqet-plus/internal/conf"
 )
 
 // TestPoolLoadArmsOnMeanNotOnEveryConn is the regression guard for the

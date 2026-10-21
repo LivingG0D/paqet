@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"paqet/internal/conf"
-	"paqet/internal/flog"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/flog"
 )
 
 var confPath string

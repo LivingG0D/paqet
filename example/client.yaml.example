@@ -1,4 +1,4 @@
-# paqet Client Configuration Example
+# paqet-plus Client Configuration Example
 # Role must be explicitly set
 role: "client"
 
@@ -46,7 +46,7 @@ network:
 
 # Server connection settings
 server:
-  addr: "10.0.0.100:9999"  # CHANGE ME: paqet server address and port
+  addr: "10.0.0.100:9999"  # CHANGE ME: paqet-plus server address and port
 
 # Transport protocol configuration
 transport:

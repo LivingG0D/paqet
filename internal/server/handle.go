@@ -3,9 +3,9 @@ package server
 import (
 	"context"
 
-	"paqet/internal/flog"
-	"paqet/internal/protocol"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/protocol"
+	"paqet-plus/internal/tnet"
 )
 
 func (s *Server) handleConn(ctx context.Context, conn tnet.Conn) {

@@ -6,9 +6,9 @@ import (
 	"net/netip"
 	"sync"
 
-	"paqet/internal/flog"
-	"paqet/internal/pkg/buffer"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/pkg/buffer"
+	"paqet-plus/internal/tnet"
 )
 
 type udpSess struct {

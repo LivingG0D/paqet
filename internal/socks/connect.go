@@ -4,8 +4,8 @@ import (
 	"context"
 	"net"
 
-	"paqet/internal/flog"
-	"paqet/internal/pkg/buffer"
+	"paqet-plus/internal/flog"
+	"paqet-plus/internal/pkg/buffer"
 )
 
 func (s *Server) handleConnect(ctx context.Context, conn net.Conn, req *request) {

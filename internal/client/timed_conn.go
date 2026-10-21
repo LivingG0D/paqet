@@ -4,10 +4,10 @@ import (
 	"sync"
 	"time"
 
-	"paqet/internal/conf"
-	"paqet/internal/protocol"
-	"paqet/internal/tnet"
-	"paqet/internal/tnet/kcp"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/protocol"
+	"paqet-plus/internal/tnet"
+	"paqet-plus/internal/tnet/kcp"
 )
 
 // tcpfWriteTimeout bounds the PTCPF control write. smux applies no write

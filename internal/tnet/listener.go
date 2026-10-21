@@ -3,7 +3,7 @@ package tnet
 import (
 	"net"
 
-	"paqet/internal/conf"
+	"paqet-plus/internal/conf"
 )
 
 type Listener interface {

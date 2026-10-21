@@ -7,9 +7,9 @@ import (
 	"github.com/xtaci/kcp-go/v5"
 	"github.com/xtaci/smux"
 
-	"paqet/internal/conf"
-	"paqet/internal/socket"
-	"paqet/internal/tnet"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/socket"
+	"paqet-plus/internal/tnet"
 )
 
 func Dial(addr *net.UDPAddr, cfg *conf.KCP, netCfg conf.Network) (tnet.Conn, error) {

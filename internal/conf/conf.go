@@ -3,7 +3,7 @@ package conf
 import (
 	"fmt"
 	"os"
-	"paqet/internal/flog"
+	"paqet-plus/internal/flog"
 	"slices"
 	"strings"
 

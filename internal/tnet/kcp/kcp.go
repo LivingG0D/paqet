@@ -1,7 +1,7 @@
 package kcp
 
 import (
-	"paqet/internal/conf"
+	"paqet-plus/internal/conf"
 
 	"github.com/xtaci/kcp-go/v5"
 	"github.com/xtaci/smux"

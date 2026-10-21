@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"paqet/internal/conf"
+	"paqet-plus/internal/conf"
 )
 
 // loNetwork returns a config bound to the loopback device. The tests need root

@@ -10,7 +10,7 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 
-	"paqet/internal/conf"
+	"paqet-plus/internal/conf"
 )
 
 // frameReader returns the next Ethernet frame, valid until the following call:

@@ -3,7 +3,7 @@ package client
 import (
 	"testing"
 
-	"paqet/internal/conf"
+	"paqet-plus/internal/conf"
 )
 
 // A second conn on a fixed source port makes the server see a new KCP conv from

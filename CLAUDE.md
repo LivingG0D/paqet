@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-paqet is a bidirectional, packet-level proxy that tunnels **KCP over raw TCP packets** crafted with **libpcap**, bypassing the kernel TCP stack to evade DPI/firewalls. This repo (`LivingG0D/paqet`) is a fork of `hanselime/paqet` with added DPI-evasion tuning, an installer/control-panel, and load-driven connection autoscaling.
+paqet-plus is a bidirectional, packet-level proxy that tunnels **KCP over raw TCP packets** crafted with **libpcap**, bypassing the kernel TCP stack to evade DPI/firewalls. This repo (`LivingG0D/paqet-plus`, renamed from `LivingG0D/paqet`) is a fork of `hanselime/paqet` with added DPI-evasion tuning, an installer/control-panel, and load-driven connection autoscaling.
 
 ## Build / Test / Run
 
@@ -12,10 +12,10 @@ paqet is a bidirectional, packet-level proxy that tunnels **KCP over raw TCP pac
 
 ```bash
 # Build (needs Go 1.27+, libpcap-dev, a C compiler)
-CGO_ENABLED=1 go build -o paqet ./cmd
+CGO_ENABLED=1 go build -o paqet-plus ./cmd
 
 # Run — requires root (raw socket / pcap access)
-sudo ./paqet run -c config.yaml
+sudo ./paqet-plus run -c config.yaml
 
 # Test (CGO required; socket pkg pulls in pcap)
 CGO_ENABLED=1 go test ./...
@@ -27,11 +27,11 @@ go vet ./...
 
 - Tests live in `internal/client`, `internal/conf`, `internal/protocol`, `internal/server` and `internal/socket`; the rest is exercised via the binary. The socket loopback tests and benchmarks (`afpacket_linux_test.go`) need root on Linux and skip otherwise.
 - **Windows hosts cannot build directly** (CGO+libpcap, cross-compile is painful). Build on Linux (native, WSL, or Docker). Windows uses Npcap + MinGW.
-- **Release binaries** are static, multi-arch (linux amd64/arm64/arm32/mips*, windows, darwin) built by `.github/workflows/build-release.yml`: Linux targets build **inside `muslcc/x86_64:*` Docker containers**, compiling a **static libpcap with musl** and linking via `-linkmode external -extldflags '-static'`, and injects build metadata with `-ldflags "-X 'paqet/cmd/version.Version=...'"` (also `GitCommit`, `GitTag`, `BuildTime`). Reproduce that recipe for production binaries, not a plain `go build`.
+- **Release binaries** are static, multi-arch (linux amd64/arm64/arm32/mips*, windows, darwin) built by `.github/workflows/build-release.yml`: Linux targets build **inside `muslcc/x86_64:*` Docker containers**, compiling a **static libpcap with musl** and linking via `-linkmode external -extldflags '-static'`, and injects build metadata with `-ldflags "-X 'paqet-plus/cmd/version.Version=...'"` (also `GitCommit`, `GitTag`, `BuildTime`). Reproduce that recipe for production binaries, not a plain `go build`.
 
 ## Server runtime requirement (non-obvious, breaks silently)
 
-Because paqet injects/reads raw TCP frames, the kernel's own stack will RST or mangle the connection. The **server must** have these `iptables` rules or it will not work:
+Because paqet-plus injects/reads raw TCP frames, the kernel's own stack will RST or mangle the connection. The **server must** have these `iptables` rules or it will not work:
 
 ```bash
 sudo iptables -t raw    -A PREROUTING -p tcp --dport <port> -j NOTRACK
@@ -39,11 +39,11 @@ sudo iptables -t raw    -A OUTPUT     -p tcp --sport <port> -j NOTRACK
 sudo iptables -t mangle -A OUTPUT     -p tcp --sport <port> --tcp-flags RST RST -j DROP
 ```
 
-`setup-paqet.sh` applies these automatically. If raw traffic "connects but no data flows," check these first.
+`setup-paqet-plus.sh` applies these automatically. If raw traffic "connects but no data flows," check these first.
 
 ## Architecture — the transport stack
 
-A connection is assembled bottom-up; understanding paqet means following this layering across packages:
+A connection is assembled bottom-up; understanding paqet-plus means following this layering across packages:
 
 1. **`internal/socket`** — `PacketConn` (implements `net.PacketConn`). `send_handle.go` crafts raw TCP frames (randomized MSS/TTL/window/timestamps for fingerprint evasion); `recv_handle.go` reads them via a BPF filter (`tcp and dst port N`) using a zero-alloc `DecodingLayerParser`. The device below is per-OS: on Linux `handle_linux.go` uses raw AF_PACKET sockets (a protocol-0 send socket that captures nothing; a receive socket with `PACKET_IGNORE_OUTGOING` and batched `recvmmsg` in Go's netpoller; libpcap only compiles the filter), elsewhere `handle.go` uses pcap handles. This is the disguised "wire."
 2. **`internal/tnet/kcp`** — wraps `PacketConn` in KCP (`xtaci/kcp-go`, with encryption `cfg.Block` + optional FEC `dshard`/`pshard`), then layers `smux` stream multiplexing on top. `dial.go` = client side, `listen.go` = server side, `kcp.go` = per-mode KCP tuning (`aplConf`) + smux config (`smuxConf`). Window sizes are set once per session from config — there is deliberately no runtime window controller (see `ticker.go`).
@@ -61,6 +61,7 @@ A connection is assembled bottom-up; understanding paqet means following this la
 
 ## Fork specifics & upstream sync
 
-- `setup-paqet.sh` — one-line installer (downloads release, systemd unit, iptables, installs `paqet-ctl`, migrates from legacy `paqet2`).
-- `manage-paqet.sh` — the `paqet-ctl` control panel (logs, config edit, KCP/MTU/conn/buffer/cipher tuning, service control, sysctl optimizations).
-- Upstream remote is `hanselime/paqet`. To pull upstream changes: `git fetch upstream && git merge upstream/master`, resolving conflicts to **keep the fork's DPI/perf/tuning work**, then verify with the build+test commands above.
+- `setup-paqet-plus.sh` — one-line installer (downloads release, systemd unit, iptables, installs `paqet-plus-ctl`, migrates from legacy `paqet2` and moves a pre-rename install from `/opt/paqet` / `paqet.service` / `paqet-ctl`). Releases before the rename ship `paqet-linux-*` archives; the installer accepts both names.
+- `setup-paqet.sh` — shim kept so old `paqet-ctl` installs and old links still update: it runs `setup-paqet-plus.sh`.
+- `manage-paqet-plus.sh` — the `paqet-plus-ctl` control panel (logs, config edit, KCP/MTU/conn/buffer/cipher tuning, service control, sysctl optimizations).
+- Upstream remote is `hanselime/paqet`. To pull upstream changes: `git fetch upstream && git merge upstream/master`, resolving conflicts to **keep the fork's DPI/perf/tuning work**, then verify with the build+test commands above. This module is `paqet-plus` and upstream's is `paqet`, so rewrite upstream's imports after a merge (`"paqet/` → `"paqet-plus/`). The PBKDF2 salt in `internal/conf/kcp_block.go` stays `"paqet"`: changing it would change every key and break interop with paqet peers.

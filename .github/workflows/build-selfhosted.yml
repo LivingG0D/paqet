@@ -78,15 +78,15 @@ jobs:
 
                   go build -v -a -trimpath \
                     -ldflags "-s -w -buildid= \
-                    -X 'paqet/cmd/version.Version=${VERSION}' \
-                    -X 'paqet/cmd/version.GitCommit=${GIT_COMMIT}' \
-                    -X 'paqet/cmd/version.GitTag=${GIT_TAG}' \
-                    -X 'paqet/cmd/version.BuildTime=${BUILD_TIME}'" \
-                    -o paqet_linux_${{ matrix.filename }} ./cmd/main.go
+                    -X 'paqet-plus/cmd/version.Version=${VERSION}' \
+                    -X 'paqet-plus/cmd/version.GitCommit=${GIT_COMMIT}' \
+                    -X 'paqet-plus/cmd/version.GitTag=${GIT_TAG}' \
+                    -X 'paqet-plus/cmd/version.BuildTime=${BUILD_TIME}'" \
+                    -o paqet-plus_linux_${{ matrix.filename }} ./cmd/main.go
 
-                  chmod +x paqet_linux_${{ matrix.filename }}
-                  tar -czvf dist/paqet-linux-${{ matrix.filename }}-${{ steps.ref_id.outputs.ref }}.tar.gz \
-                    paqet_linux_${{ matrix.filename }} \
+                  chmod +x paqet-plus_linux_${{ matrix.filename }}
+                  tar -czvf dist/paqet-plus-linux-${{ matrix.filename }}-${{ steps.ref_id.outputs.ref }}.tar.gz \
+                    paqet-plus_linux_${{ matrix.filename }} \
                     README.md \
                     example/client.yaml.example \
                     example/server.yaml.example
@@ -94,6 +94,6 @@ jobs:
             - name: Upload Artifact
               uses: actions/upload-artifact@v7
               with:
-                  name: paqet-linux-${{ matrix.filename }}
-                  path: dist/paqet-linux-${{ matrix.filename }}-${{ steps.ref_id.outputs.ref }}.tar.gz
+                  name: paqet-plus-linux-${{ matrix.filename }}
+                  path: dist/paqet-plus-linux-${{ matrix.filename }}-${{ steps.ref_id.outputs.ref }}.tar.gz
                   retention-days: 7

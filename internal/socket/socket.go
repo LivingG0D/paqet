@@ -11,7 +11,7 @@ import (
 
 	"github.com/gopacket/gopacket/pcap"
 
-	"paqet/internal/conf"
+	"paqet-plus/internal/conf"
 )
 
 type PacketConn struct {

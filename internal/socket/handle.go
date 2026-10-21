@@ -10,7 +10,7 @@ import (
 
 	"github.com/gopacket/gopacket/pcap"
 
-	"paqet/internal/conf"
+	"paqet-plus/internal/conf"
 )
 
 func openSendHandle(cfg *conf.Network) (frameWriter, error) {

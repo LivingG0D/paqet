@@ -6,8 +6,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"paqet/internal/conf"
-	"paqet/internal/server"
+	"paqet-plus/internal/conf"
+	"paqet-plus/internal/server"
 )
 
 func startServer(cfg *conf.Conf) {
