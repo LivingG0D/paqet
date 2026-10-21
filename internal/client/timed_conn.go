@@ -8,14 +8,12 @@ import (
 	"paqet/internal/socket"
 	"paqet/internal/tnet"
 	"paqet/internal/tnet/kcp"
-	"time"
 )
 
 type timedConn struct {
-	cfg    *conf.Conf
-	conn   tnet.Conn
-	expire time.Time
-	ctx    context.Context
+	cfg  *conf.Conf
+	conn tnet.Conn
+	ctx  context.Context
 }
 
 func newTimedConn(ctx context.Context, cfg *conf.Conf) (*timedConn, error) {

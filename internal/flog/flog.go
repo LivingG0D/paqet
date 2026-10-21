@@ -22,10 +22,6 @@ var (
 	logCh    = make(chan string, 4096)
 )
 
-func init() {
-
-}
-
 func SetLevel(l int) {
 	minLevel = Level(l)
 	if l != -1 {
@@ -83,11 +79,9 @@ func Debugf(format string, args ...any) { logf(Debug, format, args...) }
 func Infof(format string, args ...any)  { logf(Info, format, args...) }
 func Warnf(format string, args ...any)  { logf(Warn, format, args...) }
 func Errorf(format string, args ...any) { logf(Error, format, args...) }
+
+// Fatalf always writes to stderr, synchronously: the async log writer may be off (level none) or behind.
 func Fatalf(format string, args ...any) {
-	logf(Fatal, format, args...)
-	// flush logs (optional: small sleep to let goroutine write)
-	time.Sleep(10 * time.Millisecond)
+	fmt.Fprintf(os.Stderr, "%s [%s] %s\n", time.Now().Format("2006-01-02 15:04:05.000"), Fatal, fmt.Sprintf(format, args...))
 	os.Exit(1)
 }
-
-func Close() { close(logCh) }

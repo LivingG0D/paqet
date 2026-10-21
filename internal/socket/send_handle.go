@@ -1,10 +1,9 @@
 package socket
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	randv2 "math/rand/v2"
+	"math/rand/v2" // top-level functions are goroutine-safe ChaCha8, no syscalls
 	"net"
 	"paqet/internal/conf"
 	"paqet/internal/pkg/hash"
@@ -46,20 +45,15 @@ type SendHandle struct {
 	bufPool     sync.Pool
 }
 
-// fastRand is a per-SendHandle PRNG seeded from crypto/rand.
-// Avoids kernel syscalls on every packet while maintaining unpredictability.
-var fastRand = func() *randv2.Rand {
-	var seed [32]byte
-	rand.Read(seed[:])
-	return randv2.New(randv2.NewChaCha8(seed))
-}()
-
-func fastRandUint32() uint32 {
-	return fastRand.Uint32()
-}
+// The send handle only injects packets; a small buffer and a filter that matches nothing
+// stop the kernel from copying every packet on the interface into a ring nobody reads.
+const (
+	sendBufSize = 64 * 1024
+	sendFilter  = "less 1"
+)
 
 func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
-	handle, err := newHandle(cfg)
+	handle, err := newHandle(cfg, sendBufSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open pcap handle: %w", err)
 	}
@@ -70,15 +64,19 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 			return nil, fmt.Errorf("failed to set pcap direction out: %v", err)
 		}
 	}
+	if err := handle.SetBPFFilter(sendFilter); err != nil {
+		return nil, fmt.Errorf("failed to set send BPF filter: %w", err)
+	}
 
 	// MSS: randomize between 1360–1460 to avoid static fingerprint
-	mssVal := 1360 + int(fastRandUint32()%101)
+	mssVal := 1360 + int(rand.Uint32()%101)
 	mssBytes := []byte{byte(mssVal >> 8), byte(mssVal & 0xFF)}
 
+	// Timestamp option data (index 2) is filled per packet in buildTCPHeader.
 	synOptions := []layers.TCPOption{
 		{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: mssBytes},
 		{OptionType: layers.TCPOptionKindSACKPermitted, OptionLength: 2},
-		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: make([]byte, 8)},
+		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10},
 		{OptionType: layers.TCPOptionKindNop},
 		{OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{8}},
 	}
@@ -86,7 +84,7 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 	ackOptions := []layers.TCPOption{
 		{OptionType: layers.TCPOptionKindNop},
 		{OptionType: layers.TCPOptionKindNop},
-		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: make([]byte, 8)},
+		{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10},
 	}
 
 	sh := &SendHandle{
@@ -96,7 +94,7 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 		synOptions: synOptions,
 		ackOptions: ackOptions,
 		baseTime:   uint32(time.Now().UnixNano() / int64(time.Millisecond)),
-		seqSeed:    fastRandUint32(),
+		seqSeed:    rand.Uint32(),
 		tcpF:       TCPF{tcpF: iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF}, clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
 		ethPool: sync.Pool{
 			New: func() any {
@@ -140,7 +138,7 @@ func (h *SendHandle) buildIPv4Header(dstIP net.IP) *layers.IPv4 {
 	// TOS: DSCP value shifted left 2 bits (ECN=0), default 0 = normal traffic
 	tos := h.dscp << 2
 	// TTL: jitter 63–65 to avoid static fingerprint
-	ttl := uint8(63 + fastRandUint32()%3)
+	ttl := uint8(63 + rand.Uint32()%3)
 	*ip = layers.IPv4{
 		Version:  4,
 		IHL:      5,
@@ -158,7 +156,7 @@ func (h *SendHandle) buildIPv6Header(dstIP net.IP) *layers.IPv6 {
 	ip := h.ipv6Pool.Get().(*layers.IPv6)
 	tc := h.dscp << 2
 	// HopLimit: jitter 63–65
-	hl := uint8(63 + fastRandUint32()%3)
+	hl := uint8(63 + rand.Uint32()%3)
 	*ip = layers.IPv6{
 		Version:      6,
 		TrafficClass: tc,
@@ -173,7 +171,7 @@ func (h *SendHandle) buildIPv6Header(dstIP net.IP) *layers.IPv6 {
 func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF) *layers.TCP {
 	tcp := h.tcpPool.Get().(*layers.TCP)
 	// Window: randomize between 64240–65535 to avoid static fingerprint
-	window := uint16(64240 + fastRandUint32()%1296)
+	window := uint16(64240 + rand.Uint32()%1296)
 	*tcp = layers.TCP{
 		SrcPort: layers.TCPPort(h.srcPort),
 		DstPort: layers.TCPPort(dstPort),
@@ -183,28 +181,33 @@ func (h *SendHandle) buildTCPHeader(dstPort uint16, f conf.TCPF) *layers.TCP {
 
 	counter := atomic.AddUint32(&h.tsCounter, 1)
 	// Timestamp: base + counter-derived value + random jitter (0–7ms)
-	jitter := fastRandUint32() % 8
+	jitter := rand.Uint32() % 8
 	tsVal := h.baseTime + (counter >> 3) + jitter
+	// Options and timestamp bytes are per packet: concurrent senders share the templates.
+	ts := make([]byte, 8)
+	binary.BigEndian.PutUint32(ts[0:4], tsVal)
+	opts := h.ackOptions
 	if f.SYN {
-		binary.BigEndian.PutUint32(h.synOptions[2].OptionData[0:4], tsVal)
-		binary.BigEndian.PutUint32(h.synOptions[2].OptionData[4:8], 0)
-		tcp.Options = h.synOptions
+		opts = h.synOptions
+	}
+	tcp.Options = append(make([]layers.TCPOption, 0, len(opts)), opts...)
+	tcp.Options[2].OptionData = ts
+
+	if f.SYN {
 		// Seq: seed-based + counter with jitter
-		tcp.Seq = h.seqSeed + counter*1461 + fastRandUint32()%64
+		tcp.Seq = h.seqSeed + counter*1461 + rand.Uint32()%64
 		tcp.Ack = 0
 		if f.ACK {
 			tcp.Ack = tcp.Seq + 1
 		}
 	} else {
-		tsEcr := tsVal - (counter%200 + 50) - fastRandUint32()%10
-		binary.BigEndian.PutUint32(h.ackOptions[2].OptionData[0:4], tsVal)
-		binary.BigEndian.PutUint32(h.ackOptions[2].OptionData[4:8], tsEcr)
-		tcp.Options = h.ackOptions
+		tsEcr := tsVal - (counter%200 + 50) - rand.Uint32()%10
+		binary.BigEndian.PutUint32(ts[4:8], tsEcr)
 		// Seq/Ack: seed-based with realistic-looking increments and jitter
-		dataLen := fastRandUint32()%1400 + 100
-		seq := h.seqSeed + counter*1461 + fastRandUint32()%64
+		dataLen := rand.Uint32()%1400 + 100
+		seq := h.seqSeed + counter*1461 + rand.Uint32()%64
 		tcp.Seq = seq
-		tcp.Ack = seq - dataLen + fastRandUint32()%32
+		tcp.Ack = seq - dataLen + rand.Uint32()%32
 	}
 
 	return tcp
@@ -263,6 +266,15 @@ func (h *SendHandle) setClientTCPF(addr net.Addr, f []conf.TCPF) {
 	a := *addr.(*net.UDPAddr)
 	h.tcpF.mu.Lock()
 	h.tcpF.clientTCPF[hash.IPAddr(a.IP, uint16(a.Port))] = &iterator.Iterator[conf.TCPF]{Items: f}
+	h.tcpF.mu.Unlock()
+}
+
+// shortcut: a reconnect on the same fixed client port can race this delete and fall back to
+// local_flag for that session; track flags per session if custom remote_flag on fixed ports matters.
+func (h *SendHandle) delClientTCPF(addr net.Addr) {
+	a := *addr.(*net.UDPAddr)
+	h.tcpF.mu.Lock()
+	delete(h.tcpF.clientTCPF, hash.IPAddr(a.IP, uint16(a.Port)))
 	h.tcpF.mu.Unlock()
 }
 

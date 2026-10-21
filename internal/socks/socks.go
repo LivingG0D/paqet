@@ -34,8 +34,8 @@ func (s *SOCKS5) listen(ctx context.Context, cfg conf.SOCKS5) error {
 	}
 
 	go func() {
-		if err := server.ListenAndServe(s.handle); err != nil {
-			flog.Debugf("SOCKS5 server failed to listen on %s: %v", listenAddr.String(), err)
+		if err := server.ListenAndServe(s.handle); err != nil && ctx.Err() == nil {
+			flog.Fatalf("SOCKS5 server failed on %s: %v", listenAddr.String(), err)
 		}
 	}()
 	flog.Infof("SOCKS5 server listening on %s", listenAddr.String())

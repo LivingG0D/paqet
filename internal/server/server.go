@@ -52,41 +52,39 @@ func (s *Server) Start() error {
 		return fmt.Errorf("could not start KCP listener: %w", err)
 	}
 	defer listener.Close()
-	flog.Infof("Server started - listening for packets on :%d", s.cfg.Listen.Addr.Port)
+	flog.Infof("Server started - listening for packets on :%d", s.cfg.Network.Port)
 
 	stats := flog.NewStatsReporter(30 * time.Second)
 	stats.Start()
 	defer stats.Stop()
 
-	s.wg.Go(func() {
-		s.listen(ctx, listener)
-	})
-
+	err = s.listen(ctx, listener)
+	cancel()
 	s.wg.Wait()
 	flog.Infof("Server shutdown completed")
-	return nil
+	return err
 }
 
-func (s *Server) listen(ctx context.Context, listener tnet.Listener) {
+func (s *Server) listen(ctx context.Context, listener tnet.Listener) error {
 	go func() {
 		<-ctx.Done()
 		listener.Close()
 	}()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
 		conn, err := listener.Accept()
 		if err != nil {
-			flog.Errorf("failed to accept connection: %v", err)
-			continue
+			if ctx.Err() != nil {
+				return nil
+			}
+			// kcp-go stops reading after its first socket error and fails every Accept from then on,
+			// so exit and let the service manager restart us.
+			return fmt.Errorf("failed to accept connection: %w", err)
 		}
 		flog.Infof("accepted new connection from %s (local: %s)", conn.RemoteAddr(), conn.LocalAddr())
 
 		s.wg.Go(func() {
 			defer conn.Close()
+			defer s.pConn.DelClientTCPF(conn.RemoteAddr())
 			s.handleConn(ctx, conn)
 		})
 	}

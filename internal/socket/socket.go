@@ -22,7 +22,6 @@ type PacketConn struct {
 	cancel context.CancelFunc
 }
 
-// &OpError{Op: "listen", Net: network, Source: nil, Addr: nil, Err: err}
 func New(ctx context.Context, cfg *conf.Network) (*PacketConn, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 32768 + rand.Intn(32768)
@@ -55,13 +54,7 @@ func (c *PacketConn) ReadFrom(data []byte) (n int, addr net.Addr, err error) {
 		return 0, nil, os.ErrDeadlineExceeded
 	}
 
-	payload, addr, err := c.recvHandle.Read()
-	if err != nil {
-		return 0, nil, err
-	}
-	n = copy(data, payload)
-
-	return n, addr, nil
+	return c.recvHandle.Read(data)
 }
 
 func (c *PacketConn) WriteTo(data []byte, addr net.Addr) (n int, err error) {
@@ -97,11 +90,6 @@ func (c *PacketConn) Close() error {
 
 func (c *PacketConn) LocalAddr() net.Addr {
 	return nil
-	// return &net.UDPAddr{
-	// 	IP:   append([]byte(nil), c.cfg.PrimaryAddr().IP...),
-	// 	Port: c.cfg.PrimaryAddr().Port,
-	// 	Zone: c.cfg.PrimaryAddr().Zone,
-	// }
 }
 
 func (c *PacketConn) SetDeadline(t time.Time) error {
@@ -120,10 +108,10 @@ func (c *PacketConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-func (c *PacketConn) SetDSCP(dscp int) error {
-	return nil
-}
-
 func (c *PacketConn) SetClientTCPF(addr net.Addr, f []conf.TCPF) {
 	c.sendHandle.setClientTCPF(addr, f)
+}
+
+func (c *PacketConn) DelClientTCPF(addr net.Addr) {
+	c.sendHandle.delClientTCPF(addr)
 }

@@ -8,7 +8,7 @@ import (
 	"github.com/gopacket/gopacket/pcap"
 )
 
-func newHandle(cfg *conf.Network) (*pcap.Handle, error) {
+func newHandle(cfg *conf.Network, bufSize int) (*pcap.Handle, error) {
 	// On Windows, use the GUID field to construct the NPF device name
 	// On other platforms, use the interface name directly
 	ifaceName := cfg.Interface.Name
@@ -22,8 +22,8 @@ func newHandle(cfg *conf.Network) (*pcap.Handle, error) {
 	}
 	defer inactive.CleanUp()
 
-	if err = inactive.SetBufferSize(cfg.PCAP.Sockbuf); err != nil {
-		return nil, fmt.Errorf("failed to set pcap buffer size to %d: %v", cfg.PCAP.Sockbuf, err)
+	if err = inactive.SetBufferSize(bufSize); err != nil {
+		return nil, fmt.Errorf("failed to set pcap buffer size to %d: %v", bufSize, err)
 	}
 
 	if err = inactive.SetSnapLen(cfg.PCAP.SnapLen); err != nil {

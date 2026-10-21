@@ -64,34 +64,29 @@ func (p *Proto) Read(r io.Reader) error {
 	return fmt.Errorf("unknown protocol type: 0x%02x", p.Type)
 }
 
+// Write sends the message in a single Write: on a smux stream every Write is its own frame.
 func (p *Proto) Write(w io.Writer) error {
-	// Write type byte
-	if err := binary.Write(w, binary.BigEndian, p.Type); err != nil {
-		return err
-	}
+	buf := []byte{p.Type}
 
 	switch p.Type {
 	case PPING, PPONG:
 		// Just the type byte — 1 byte total instead of ~50 with gob
-		return nil
 
 	case PTCPF:
-		count := uint8(len(p.TCPF))
-		if err := binary.Write(w, binary.BigEndian, count); err != nil {
-			return err
-		}
+		buf = append(buf, uint8(len(p.TCPF)))
 		for _, f := range p.TCPF {
-			if err := binary.Write(w, binary.BigEndian, encodeTCPF(f)); err != nil {
-				return err
-			}
+			buf = binary.BigEndian.AppendUint16(buf, encodeTCPF(f))
 		}
-		return nil
 
 	case PTCP, PUDP:
-		return writeAddr(w, p.Addr)
+		buf = appendAddr(buf, p.Addr)
+
+	default:
+		return fmt.Errorf("unknown protocol type: 0x%02x", p.Type)
 	}
 
-	return fmt.Errorf("unknown protocol type: 0x%02x", p.Type)
+	_, err := w.Write(buf)
+	return err
 }
 
 // encodeTCPF packs TCP flags into a uint16 bitmask.
@@ -142,26 +137,15 @@ func decodeTCPF(flags uint16) conf.TCPF {
 	}
 }
 
-// writeAddr serializes a tnet.Addr to binary.
+// appendAddr serializes a tnet.Addr to binary.
 // Format: [1 byte present][1 byte hostLen][host bytes][2 byte port]
-func writeAddr(w io.Writer, addr *tnet.Addr) error {
+func appendAddr(buf []byte, addr *tnet.Addr) []byte {
 	if addr == nil {
-		return binary.Write(w, binary.BigEndian, uint8(0)) // not present
+		return append(buf, 0) // not present
 	}
-	if err := binary.Write(w, binary.BigEndian, uint8(1)); err != nil { // present
-		return err
-	}
-	hostBytes := []byte(addr.Host)
-	hostLen := uint8(len(hostBytes))
-	if err := binary.Write(w, binary.BigEndian, hostLen); err != nil {
-		return err
-	}
-	if hostLen > 0 {
-		if _, err := w.Write(hostBytes); err != nil {
-			return err
-		}
-	}
-	return binary.Write(w, binary.BigEndian, uint16(addr.Port))
+	buf = append(buf, 1, uint8(len(addr.Host))) // present, hostLen
+	buf = append(buf, addr.Host...)
+	return binary.BigEndian.AppendUint16(buf, uint16(addr.Port))
 }
 
 // readAddr deserializes a tnet.Addr from binary.

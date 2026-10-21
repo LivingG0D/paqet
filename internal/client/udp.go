@@ -37,14 +37,16 @@ func (c *Client) UDP(lAddr, tAddr string) (tnet.Strm, bool, uint64, error) {
 		return nil, false, 0, err
 	}
 
-	c.udpPool.mu.Lock()
-	c.udpPool.strms[key] = strm
-	c.udpPool.mu.Unlock()
+	// Datagrams arrive on separate goroutines; if another one won the race, use its stream.
+	if existing, added := c.udpPool.add(key, strm); !added {
+		strm.Close()
+		return existing, false, key, nil
+	}
 
 	flog.Debugf("UDP stream %d created for %s -> %s", strm.SID(), lAddr, tAddr)
 	return strm, true, key, nil
 }
 
-func (c *Client) CloseUDP(key uint64) error {
-	return c.udpPool.delete(key)
+func (c *Client) CloseUDP(key uint64, strm tnet.Strm) error {
+	return c.udpPool.delete(key, strm)
 }

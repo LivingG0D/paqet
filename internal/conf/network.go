@@ -60,7 +60,7 @@ func (n *Network) validate() []error {
 	if ipv6Configured {
 		errors = append(errors, n.IPv6.validate()...)
 	}
-	if ipv4Configured && ipv6Configured {
+	if n.IPv4.Addr != nil && n.IPv6.Addr != nil {
 		if n.IPv4.Addr.Port != n.IPv6.Addr.Port {
 			errors = append(errors, fmt.Errorf("IPv4 port (%d) and IPv6 port (%d) must match when both are configured", n.IPv4.Addr.Port, n.IPv6.Addr.Port))
 		}

@@ -15,9 +15,3 @@ func (it *Iterator[T]) Next() T {
 	}
 	return it.Items[i%n]
 }
-
-func (it *Iterator[T]) Peek() T {
-	n := len(it.Items)
-	i := it.index.Load()
-	return it.Items[i%uint64(n)]
-}

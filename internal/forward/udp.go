@@ -59,13 +59,12 @@ func (f *Forward) handleUDPPacket(ctx context.Context, conn *net.UDPConn) error 
 	strm, new, k, err := f.client.UDP(caddr.String(), f.targetAddr)
 	if err != nil {
 		flog.Errorf("failed to establish UDP stream for %s -> %s: %v", caddr, f.targetAddr, err)
-		f.client.CloseUDP(k)
 		return err
 	}
 
 	if _, err := strm.Write(buf[:n]); err != nil {
 		flog.Errorf("failed to forward %d bytes from %s -> %s: %v", n, caddr, f.targetAddr, err)
-		f.client.CloseUDP(k)
+		f.client.CloseUDP(k, strm)
 		return err
 	}
 	if new {
@@ -81,7 +80,7 @@ func (f *Forward) handleUDPStrm(ctx context.Context, k uint64, strm tnet.Strm, c
 	defer func() {
 		buffer.UPool.Put(bufp)
 		flog.Debugf("UDP stream %d closed for %s -> %s", strm.SID(), caddr, f.targetAddr)
-		f.client.CloseUDP(k)
+		f.client.CloseUDP(k, strm)
 	}()
 	buf := *bufp
 

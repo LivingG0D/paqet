@@ -9,7 +9,7 @@ type Conn interface {
 	OpenStrm() (Strm, error)
 	AcceptStrm() (Strm, error)
 	NumStreams() int
-	Ping(wait bool) error
+	IsClosed() bool
 	Close() error
 	LocalAddr() net.Addr
 	RemoteAddr() net.Addr

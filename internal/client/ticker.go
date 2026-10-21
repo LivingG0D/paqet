@@ -3,25 +3,26 @@ package client
 import (
 	"context"
 	"paqet/internal/flog"
+	"paqet/internal/tnet"
 	"paqet/internal/tnet/kcp"
 	"time"
 )
 
 const (
-	windowTuneInterval = 10 * time.Second
-	connScaleInterval  = 30 * time.Second
-	maxStreamsPerConn  = 64
-	idleTimeout        = 60 * time.Second
+	connScaleInterval = 30 * time.Second
+	maxStreamsPerConn = 64
 )
 
 func (c *Client) ticker(ctx context.Context) {
-	windowTicker := time.NewTicker(windowTuneInterval)
 	connScaleTicker := time.NewTicker(connScaleInterval)
-	defer windowTicker.Stop()
 	defer connScaleTicker.Stop()
 
 	// Start auto-tuners for initial connections
-	c.startAutoTuners(ctx)
+	c.mu.Lock()
+	for _, tc := range c.iter.Items {
+		c.startAutoTuner(ctx, tc.conn)
+	}
+	c.mu.Unlock()
 
 	for {
 		select {
@@ -33,20 +34,15 @@ func (c *Client) ticker(ctx context.Context) {
 	}
 }
 
-// startAutoTuners launches a window auto-tuner goroutine per KCP connection.
-func (c *Client) startAutoTuners(ctx context.Context) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for _, tc := range c.iter.Items {
-		if kcpConn, ok := tc.conn.(*kcp.Conn); ok {
-			at := kcp.NewAutoTuner(
-				kcpConn,
-				c.cfg.Transport.KCP.Sndwnd,
-				c.cfg.Transport.KCP.Rcvwnd,
-			)
-			go at.Run(ctx)
-		}
+// startAutoTuner launches a window auto-tuner for a KCP connection; it stops when the connection closes.
+func (c *Client) startAutoTuner(ctx context.Context, conn tnet.Conn) {
+	if kcpConn, ok := conn.(*kcp.Conn); ok {
+		at := kcp.NewAutoTuner(
+			kcpConn,
+			c.cfg.Transport.KCP.Sndwnd,
+			c.cfg.Transport.KCP.Rcvwnd,
+		)
+		go at.Run(ctx)
 	}
 }
 
@@ -74,16 +70,7 @@ func (c *Client) scaleConnections(ctx context.Context) {
 			return
 		}
 		c.iter.Items = append(c.iter.Items, tc)
-
-		// Start auto-tuner for new connection
-		if kcpConn, ok := tc.conn.(*kcp.Conn); ok {
-			at := kcp.NewAutoTuner(
-				kcpConn,
-				c.cfg.Transport.KCP.Sndwnd,
-				c.cfg.Transport.KCP.Rcvwnd,
-			)
-			go at.Run(ctx)
-		}
+		c.startAutoTuner(ctx, tc.conn)
 
 		flog.Infof("autoscale: added connection (%d → %d), all had >%d streams",
 			numConns, len(c.iter.Items), maxStreamsPerConn)

@@ -5,6 +5,7 @@ import (
 	"net"
 	"paqet/internal/flog"
 	"paqet/internal/pkg/buffer"
+	"time"
 )
 
 func (f *Forward) listenTCP(ctx context.Context) error {
@@ -28,6 +29,7 @@ func (f *Forward) listenTCP(ctx context.Context) error {
 				return nil
 			default:
 				flog.Errorf("failed to accept TCP connection on %s: %v", f.listenAddr, err)
+				time.Sleep(100 * time.Millisecond) // e.g. EMFILE: back off instead of spinning
 				continue
 			}
 		}

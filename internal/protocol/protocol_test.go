@@ -91,6 +91,32 @@ func TestProtoRoundTripTCPF(t *testing.T) {
 	}
 }
 
+type countWriter struct {
+	bytes.Buffer
+	calls int
+}
+
+func (w *countWriter) Write(p []byte) (int, error) {
+	w.calls++
+	return w.Buffer.Write(p)
+}
+
+// Each Write on a smux stream is its own frame, and in fast2/fast3 its own packet.
+func TestProtoWriteIsOneCall(t *testing.T) {
+	for _, p := range []Proto{
+		{Type: PTCP, Addr: &tnet.Addr{Host: "www.google.com", Port: 443}},
+		{Type: PTCPF, TCPF: []conf.TCPF{{PSH: true, ACK: true}, {SYN: true}}},
+	} {
+		var w countWriter
+		if err := p.Write(&w); err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+		if w.calls != 1 {
+			t.Errorf("type 0x%02x: Write made %d calls, want 1", p.Type, w.calls)
+		}
+	}
+}
+
 func TestProtoRoundTripHostname(t *testing.T) {
 	addr := &tnet.Addr{Host: "www.google.com", Port: 80}
 	orig := Proto{Type: PTCP, Addr: addr}

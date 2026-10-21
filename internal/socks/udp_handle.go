@@ -11,9 +11,6 @@ import (
 )
 
 func (h *Handler) UDPHandle(server *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram) error {
-	bufp := buffer.UPool.Get().(*[]byte)
-	defer buffer.UPool.Put(bufp)
-	buf := *bufp
 	strm, new, k, err := h.client.UDP(addr.String(), d.Address())
 	if err != nil {
 		flog.Errorf("SOCKS5 failed to establish UDP stream for %s -> %s: %v", addr, d.Address(), err)
@@ -24,16 +21,20 @@ func (h *Handler) UDPHandle(server *socks5.Server, addr *net.UDPAddr, d *socks5.
 	strm.SetWriteDeadline(time.Time{})
 	if err != nil {
 		flog.Errorf("SOCKS5 failed to forward %d bytes from %s -> %s: %v", len(d.Data), addr, d.Address(), err)
-		h.client.CloseUDP(k)
+		h.client.CloseUDP(k, strm)
 		return err
 	}
 
 	if new {
 		flog.Infof("SOCKS5 accepted UDP connection %s -> %s", addr, d.Address())
 		go func() {
+			// The buffer belongs to this reader: it outlives UDPHandle.
+			bufp := buffer.UPool.Get().(*[]byte)
+			buf := *bufp
 			defer func() {
+				buffer.UPool.Put(bufp)
 				flog.Debugf("SOCKS5 UDP stream %d closed for %s -> %s", strm.SID(), addr, d.Address())
-				h.client.CloseUDP(k)
+				h.client.CloseUDP(k, strm)
 			}()
 			for {
 				select {
@@ -61,32 +62,7 @@ func (h *Handler) UDPHandle(server *socks5.Server, addr *net.UDPAddr, d *socks5.
 }
 
 func (h *Handler) handleUDPAssociate(conn *net.TCPConn) error {
-	addr := conn.LocalAddr().(*net.TCPAddr)
-
-	bufp := rPool.Get().(*[]byte)
-	defer rPool.Put(bufp)
-	buf := *bufp
-	buf = append(buf, socks5.Ver)
-	buf = append(buf, socks5.RepSuccess)
-	buf = append(buf, 0x00) // reserved
-	if ip4 := addr.IP.To4(); ip4 != nil {
-		// IPv4
-		buf = append(buf, socks5.ATYPIPv4)
-		buf = append(buf, ip4...)
-	} else if ip6 := addr.IP.To16(); ip6 != nil {
-		// IPv6
-		buf = append(buf, socks5.ATYPIPv6)
-		buf = append(buf, ip6...)
-	} else {
-		// Domain name
-		host := addr.IP.String()
-		buf = append(buf, socks5.ATYPDomain)
-		buf = append(buf, byte(len(host)))
-		buf = append(buf, host...)
-	}
-	buf = append(buf, byte(addr.Port>>8), byte(addr.Port&0xff))
-
-	if _, err := conn.Write(buf); err != nil {
+	if err := writeReply(conn); err != nil {
 		return err
 	}
 	flog.Debugf("SOCKS5 accepted UDP_ASSOCIATE from %s, waiting for TCP connection to close", conn.RemoteAddr())

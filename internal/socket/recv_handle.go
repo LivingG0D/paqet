@@ -22,7 +22,7 @@ type RecvHandle struct {
 }
 
 func NewRecvHandle(cfg *conf.Network) (*RecvHandle, error) {
-	handle, err := newHandle(cfg)
+	handle, err := newHandle(cfg, cfg.PCAP.Sockbuf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open pcap handle: %w", err)
 	}
@@ -54,19 +54,20 @@ func NewRecvHandle(cfg *conf.Network) (*RecvHandle, error) {
 	return rh, nil
 }
 
-func (h *RecvHandle) Read() ([]byte, net.Addr, error) {
-	data, _, err := h.handle.ReadPacketData()
+// Read copies the TCP payload of the next packet into data. Not safe for concurrent callers.
+// ReadPacketData, not ZeroCopyReadPacketData: a zero-copy slice can be freed by a concurrent
+// Close, and guarding it with a lock would stop Close from interrupting a blocked read.
+func (h *RecvHandle) Read(data []byte) (int, net.Addr, error) {
+	pkt, _, err := h.handle.ReadPacketData()
 	if err != nil {
-		return nil, nil, err
+		return 0, nil, err
 	}
 
 	addr := &net.UDPAddr{}
 	h.decoded = h.decoded[:0]
+	_ = h.parser.DecodeLayers(pkt, &h.decoded) // partial decode is ok; we check which layers we got
 
-	if err := h.parser.DecodeLayers(data, &h.decoded); err != nil {
-		// Partial decode is ok — we may still have the layers we need
-	}
-
+	hasTCP := false
 	for _, lt := range h.decoded {
 		switch lt {
 		case layers.LayerTypeIPv4:
@@ -75,14 +76,15 @@ func (h *RecvHandle) Read() ([]byte, net.Addr, error) {
 			addr.IP = h.ip6.SrcIP
 		case layers.LayerTypeTCP:
 			addr.Port = int(h.tcp.SrcPort)
+			hasTCP = true
 		}
 	}
 
-	payload := h.tcp.LayerPayload()
-	if len(payload) == 0 {
-		return nil, addr, nil
+	// Without a decoded TCP layer, h.tcp still holds the previous packet.
+	if !hasTCP {
+		return 0, addr, nil
 	}
-	return payload, addr, nil
+	return copy(data, h.tcp.LayerPayload()), addr, nil
 }
 
 func (h *RecvHandle) Close() {

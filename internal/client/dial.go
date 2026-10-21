@@ -30,18 +30,14 @@ func (c *Client) newConn() (tnet.Conn, error) {
 		bestTC = c.iter.Next()
 	}
 
-	autoExpire := 300
-	go bestTC.sendTCPF(bestTC.conn)
-	err := bestTC.conn.Ping(false)
-	if err != nil {
+	// No network I/O under c.mu unless the session is already dead.
+	if bestTC.conn.IsClosed() {
 		flog.Infof("connection lost, retrying....")
-		if bestTC.conn != nil {
-			bestTC.conn.Close()
-		}
+		bestTC.conn.Close()
 		if conn, err := bestTC.createConn(); err == nil {
 			bestTC.conn = conn
+			c.startAutoTuner(bestTC.ctx, conn)
 		}
-		bestTC.expire = time.Now().Add(time.Duration(autoExpire) * time.Second)
 	}
 	return bestTC.conn, nil
 }

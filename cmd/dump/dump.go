@@ -58,7 +58,6 @@ var Cmd = &cobra.Command{
 			case packet := <-packets:
 				go handlePacket(packet)
 			case <-sigChan:
-				// handle.Close()
 				flog.Infof("Shutdown signal received, exiting.")
 				return
 			}
@@ -94,7 +93,6 @@ func handlePacket(packet gopacket.Packet) {
 		dstAddr,
 		len(payload),
 	))
-	// sb.WriteString(fmt.Sprintf("Flags: %s\n", ""))
 	sb.WriteString("--- PAYLOAD (HEX DUMP) ---\n")
 	sb.WriteString(hex.Dump(payload))
 	sb.WriteString("--------------------------")

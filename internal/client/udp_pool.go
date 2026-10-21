@@ -11,16 +11,26 @@ type udpPool struct {
 	mu    sync.RWMutex
 }
 
-func (p *udpPool) delete(key uint64) error {
+// add stores strm under key unless another stream got there first; it returns the stream to use.
+func (p *udpPool) add(key uint64, strm tnet.Strm) (tnet.Strm, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if strm, exists := p.strms[key]; exists {
-		flog.Debugf("closing UDP session stream %d", strm.SID())
-		strm.Close()
-	} else {
-		flog.Debugf("UDP session key %d not found for close", key)
+	if old, exists := p.strms[key]; exists {
+		return old, false
 	}
-	delete(p.strms, key)
+	p.strms[key] = strm
+	return strm, true
+}
+
+// delete closes strm and drops it from the pool only if it is still the stream stored under key.
+func (p *udpPool) delete(key uint64, strm tnet.Strm) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.strms[key] == strm {
+		delete(p.strms, key)
+	}
+	flog.Debugf("closing UDP session stream %d", strm.SID())
+	strm.Close()
 
 	return nil
 }

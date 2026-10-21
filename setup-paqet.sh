@@ -97,7 +97,7 @@ if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN
 
             # --- Step 5: Apply standard optimization patches ---
             sed -i 's/conn: .*/conn: 8/' "$INSTALL_DIR/config.yaml"
-            sed -i 's/block: .*/block: "salsa20"/' "$INSTALL_DIR/config.yaml"
+            # block is kept as-is: both ends must use the same cipher
             sed -i 's/mtu: .*/mtu: 1200/' "$INSTALL_DIR/config.yaml"
             sed -i 's/sockbuf: .*/sockbuf: 16777216/' "$INSTALL_DIR/config.yaml"
             # Disable FEC: remove old dshard/pshard and add dshard=0/pshard=0
@@ -105,7 +105,7 @@ if [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || [ -f "$INSTALL_DIR/$BIN
             sed -i '/^\s*pshard:/d' "$INSTALL_DIR/config.yaml"
             sed -i '/block:/a\    dshard: 0\n    pshard: 0' "$INSTALL_DIR/config.yaml"
             
-            echo -e "${GREEN}Configuration migrated (fast mode, 8 conns, XOR, FEC off, 16MB buffer).${NC}"
+            echo -e "${GREEN}Configuration migrated (8 conns, MTU 1200, FEC off, 16MB buffer, cipher unchanged).${NC}"
         fi
     else
         echo -e "${BLUE}Stopping and removing existing service...${NC}"
@@ -309,7 +309,7 @@ echo -e "\n${BLUE}Encryption${NC}"
 echo "Choose encryption for KCP packets (MUST match on both sides):"
 echo ""
 echo "  ${GREEN}Recommended:${NC}"
-echo "    salsa20   - Salsa20 stream cipher. Fast, no block padding. Best DPI bypass. (DEFAULT)"
+echo "    aes-128-gcm - AES-128-GCM. Encrypts and detects tampering. Hardware-accelerated. (DEFAULT)"
 echo "    xor       - XOR cipher. Very fast, low CPU. Basic header obfuscation."
 echo "    none      - No encryption. Zero CPU cost. Use when V2Ray/tunnel already encrypts."
 echo ""
@@ -317,8 +317,7 @@ echo "  ${BLUE}Standard:${NC}"
 echo "    aes       - AES-256 (auto key size). Strong, hardware-accelerated on modern CPUs."
 echo "    aes-128   - AES-128. Slightly faster than AES-256, still very strong."
 echo "    aes-192   - AES-192. Middle ground between AES-128 and AES-256."
-echo "    aes-128-gcm - AES-128-GCM. Authenticated encryption (integrity + confidentiality)."
-echo "    salsa20   - Salsa20 stream cipher. Fast, constant-time. Good for DPI evasion."
+echo "    salsa20   - Salsa20 stream cipher. Fast, but does not detect tampering."
 echo ""
 echo "  ${CYAN}Specialized:${NC}"
 echo "    sm4       - Chinese national standard. 128-bit block cipher."
@@ -329,8 +328,8 @@ echo "    3des      - Triple DES. Legacy, slow. Not recommended."
 echo "    tea/xtea  - Tiny Encryption Algorithm. Simple, compact."
 echo "    null      - Truly null (no processing at all). Debug only."
 echo ""
-read -r -p "Encryption [salsa20/xor/none/aes/...] (default salsa20): " KCP_BLOCK < /dev/tty
-KCP_BLOCK=${KCP_BLOCK:-"salsa20"}
+read -r -p "Encryption [aes-128-gcm/salsa20/xor/none/aes/...] (default aes-128-gcm): " KCP_BLOCK < /dev/tty
+KCP_BLOCK=${KCP_BLOCK:-"aes-128-gcm"}
 
 # FEC Selection
 echo -e "\n${BLUE}Forward Error Correction (FEC)${NC}"
@@ -358,8 +357,6 @@ if [ "$ROLE_OPT" == "1" ]; then
 role: "server"
 log:
   level: "info"
-listen:
-  addr: ":$PORT"
 network:
   interface: "$CFG_IFACE"
   ipv4:

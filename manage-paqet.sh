@@ -143,14 +143,14 @@ tune_performance() {
     read -r -p "Enter new MTU [1200-1500] (leave empty to keep): " NEW_MTU < /dev/tty
     read -r -p "Enter Number of Connections [e.g. 4] (leave empty to keep): " NEW_CONN < /dev/tty
     read -r -p "Enter PCAP Buffer Size (MB) [e.g. 16] (leave empty to keep): " NEW_BUF < /dev/tty
-    read -r -p "Enter Encryption Method [aes/xor/none] (leave empty to keep): " NEW_CRYPT < /dev/tty
+    read -r -p "Enter Encryption Method [aes-128-gcm/aes/salsa20/xor/none] (must match the other side, leave empty to keep): " NEW_CRYPT < /dev/tty
 
     # Sanitize inputs to remove hidden characters/newlines
     NEW_MODE=$(echo "$NEW_MODE" | tr -cd '[:alnum:]')
     NEW_MTU=$(echo "$NEW_MTU" | tr -cd '[:digit:]')
     NEW_CONN=$(echo "$NEW_CONN" | tr -cd '[:digit:]')
     NEW_BUF=$(echo "$NEW_BUF" | tr -cd '[:digit:]')
-    NEW_CRYPT=$(echo "$NEW_CRYPT" | tr -cd '[:alnum:]')
+    NEW_CRYPT=$(echo "$NEW_CRYPT" | tr -cd '[:alnum:]-') # keep '-' for aes-128-gcm
 
     if [ ! -z "$NEW_MODE" ]; then
         if grep -q "mode:" "$CONFIG_FILE"; then

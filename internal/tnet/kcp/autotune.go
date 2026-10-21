@@ -12,14 +12,16 @@ import (
 // AutoTuner monitors KCP stats and dynamically adjusts window sizes.
 // Uses global kcp.DefaultSnmp since kcp-go v5 doesn't expose per-connection stats.
 type AutoTuner struct {
-	conn     *Conn
-	maxSnd   int
-	maxRcv   int
-	curSnd   int
-	curRcv   int
-	lastSent uint64
-	lastRecv uint64
-	mu       sync.Mutex
+	conn        *Conn
+	maxSnd      int
+	maxRcv      int
+	curSnd      int
+	curRcv      int
+	lastSent    uint64
+	lastRecv    uint64
+	lastRetrans uint64
+	lastOutSegs uint64
+	mu          sync.Mutex
 }
 
 const (
@@ -52,7 +54,7 @@ func NewAutoTuner(conn *Conn, maxSnd, maxRcv int) *AutoTuner {
 	}
 }
 
-// Run starts the auto-tuning loop. Blocks until ctx is cancelled.
+// Run starts the auto-tuning loop. Blocks until ctx is cancelled or the connection closes.
 func (at *AutoTuner) Run(ctx context.Context) {
 	ticker := time.NewTicker(tuneInterval)
 	defer ticker.Stop()
@@ -61,12 +63,17 @@ func (at *AutoTuner) Run(ctx context.Context) {
 	snap := kcp.DefaultSnmp.Copy()
 	at.lastSent = snap.BytesSent
 	at.lastRecv = snap.BytesReceived
+	at.lastRetrans = snap.RetransSegs
+	at.lastOutSegs = snap.OutSegs
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if at.conn.IsClosed() {
+				return
+			}
 			at.tune()
 		}
 	}
@@ -86,10 +93,14 @@ func (at *AutoTuner) tune() {
 
 	totalDelta := sentDelta + recvDelta
 
-	// Compute retransmission rate from global stats
+	// Retransmission rate over this interval only; lifetime totals would pin an early loss burst forever
+	retransDelta := snap.RetransSegs - at.lastRetrans
+	outDelta := snap.OutSegs - at.lastOutSegs
+	at.lastRetrans = snap.RetransSegs
+	at.lastOutSegs = snap.OutSegs
 	retransRate := float64(0)
-	if snap.OutSegs > 0 {
-		retransRate = float64(snap.RetransSegs) / float64(snap.OutSegs)
+	if outDelta > 0 {
+		retransRate = float64(retransDelta) / float64(outDelta)
 	}
 
 	oldSnd := at.curSnd

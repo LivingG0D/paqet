@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -133,7 +134,7 @@ func (s *StatsReporter) report() {
 		}
 		if numConns > 0 {
 			logf(Info, "[STATS] conn: %d active | streams %d | [%s]",
-				numConns, totalStreams, join(perConn, ", "))
+				numConns, totalStreams, strings.Join(perConn, ", "))
 		}
 	}
 
@@ -227,15 +228,4 @@ func fmtCount(n float64) string {
 	default:
 		return fmt.Sprintf("%.0f", n)
 	}
-}
-
-func join(ss []string, sep string) string {
-	if len(ss) == 0 {
-		return ""
-	}
-	r := ss[0]
-	for _, s := range ss[1:] {
-		r += sep + s
-	}
-	return r
 }
