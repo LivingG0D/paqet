@@ -45,6 +45,7 @@ func (l *Listener) Accept() (tnet.Conn, error) {
 		conn.Close()
 		return nil, fmt.Errorf("kcp: failed to create smux session: %w", err)
 	}
+	go pace(conn, l.cfg.Sndwnd, l.cfg.MTU, sess.CloseChan())
 	return &Conn{nil, conn, sess}, nil
 }
 

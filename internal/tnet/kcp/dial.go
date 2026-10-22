@@ -32,6 +32,7 @@ func Dial(addr *net.UDPAddr, cfg *conf.KCP, netCfg conf.Network) (tnet.Conn, err
 		packetConn.Close()
 		return nil, fmt.Errorf("kcp: failed to create smux session: %w", err)
 	}
+	go pace(conn, cfg.Sndwnd, cfg.MTU, sess.CloseChan())
 
 	return &Conn{packetConn, conn, sess}, nil
 }
