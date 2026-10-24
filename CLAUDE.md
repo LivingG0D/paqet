@@ -57,7 +57,7 @@ A connection is assembled bottom-up; understanding paqet-plus means following th
 
 ## Configuration
 
-`internal/conf` loads YAML into per-section structs (`network`, `pcap`, `kcp`, `transport`, `socks`, `forward`, `server`, `log`), each with `setDefaults` + `validate`. The server listens on the `network.ipv4/ipv6` port; there is no `listen` section. Annotated examples live in `example/`. Fork defaults: `aes-128-gcm` cipher (the only block with tamper detection), smux keepalive 30s/90s, FEC off (`dshard:10 pshard:1` when enabled), and the tuning measured best on a 78ms path with many users, the same the installer writes: `conn: 8`, mode `normal`, MTU 1250, windows 1024, smuxbuf 16MB / streambuf 4MB. `paqet-plus run` caps GOMAXPROCS at 4 on bigger hosts unless the env var is set (`cmd/run/procs.go`). KCP `block` cipher and `key` must match on both ends; FEC settings must match too (they change the packet format).
+`internal/conf` loads YAML into per-section structs (`network`, `pcap`, `kcp`, `transport`, `socks`, `forward`, `server`, `log`), each with `setDefaults` + `validate`. The server listens on the `network.ipv4/ipv6` port; there is no `listen` section. Annotated examples live in `example/`. Fork defaults: `aes-128-gcm` cipher (the only block with tamper detection), smux keepalive 30s/90s, FEC off (`dshard:10 pshard:1` when enabled), and the tuning measured best on a 78ms path with many users, the same the installer writes: `conn: 8`, mode `normal`, MTU 1250, windows 1024, smuxbuf 16MB / streambuf 4MB. KCP `block` cipher and `key` must match on both ends; FEC settings must match too (they change the packet format).
 
 ## Fork specifics & upstream sync
 
