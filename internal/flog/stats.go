@@ -91,6 +91,10 @@ func (s *StatsReporter) report() {
 	retrans := curr.RetransSegs - prev.RetransSegs
 	outSegs := curr.OutSegs - prev.OutSegs
 	lost := curr.LostSegs - prev.LostSegs
+	fast := curr.FastRetransSegs - prev.FastRetransSegs
+	// dup counts segments this side had already received: when it nears the peer's
+	// retrans count, those retransmissions were spurious rather than loss.
+	dup := curr.RepeatSegs - prev.RepeatSegs
 	inErrs := curr.InErrs - prev.InErrs
 
 	var retransRate float64
@@ -102,13 +106,15 @@ func (s *StatsReporter) report() {
 	rcvQ := curr.RingBufferRcvQueue
 	sndBuf := curr.RingBufferSndBuffer
 
-	logf(Info, "[STATS] kcp: ↑%s/s ↓%s/s | pkt ↑%s/s ↓%s/s | retrans %.1f%% (%d) | lost %d | err %d | sndQ %d rcvQ %d sndBuf %d",
+	logf(Info, "[STATS] kcp: ↑%s/s ↓%s/s | pkt ↑%s/s ↓%s/s | retrans %.1f%% (%d) | lost %d | fast %d | dup %d | err %d | sndQ %d rcvQ %d sndBuf %d",
 		fmtBytes(float64(outBytes)/elapsed),
 		fmtBytes(float64(inBytes)/elapsed),
 		fmtCount(float64(outPkts)/elapsed),
 		fmtCount(float64(inPkts)/elapsed),
 		retransRate, retrans,
 		lost,
+		fast,
+		dup,
 		inErrs,
 		sndQ, rcvQ, sndBuf,
 	)
