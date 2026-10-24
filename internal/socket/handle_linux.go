@@ -26,7 +26,19 @@ import (
 // rawWriter sends on a protocol-0 packet socket. The kernel never delivers
 // frames to such a socket, whereas a pcap handle is a capture socket: the host
 // copies every frame it sends or receives to it and runs its filter.
-type rawWriter struct{ f *os.File }
+type rawWriter struct {
+	f  *os.File
+	rc syscall.RawConn
+
+	// sendmmsg state for WritePacketDataBatch. SendHandle.writeMu serializes
+	// every write, so it needs no lock of its own.
+	msgs  [sendBatch]mmsghdr
+	iovs  [sendBatch]unix.Iovec
+	n     int // frames queued in msgs
+	sent  int
+	err   error
+	flush func(fd uintptr) bool // w.sendmmsg, bound once so rc.Write allocates nothing
+}
 
 // ifindex looks the interface up by name on every open, as libpcap does. An
 // interface that was recreated (wifi reload, replugged USB NIC) comes back with
@@ -52,7 +64,17 @@ func openSendHandle(cfg *conf.Network) (frameWriter, error) {
 		unix.Close(fd)
 		return nil, fmt.Errorf("failed to bind packet socket to %s: %w", cfg.Interface.Name, err)
 	}
-	return &rawWriter{os.NewFile(uintptr(fd), "afpacket")}, nil
+	w := &rawWriter{f: os.NewFile(uintptr(fd), "afpacket")}
+	if w.rc, err = w.f.SyscallConn(); err != nil {
+		w.f.Close()
+		return nil, err
+	}
+	for i := range w.msgs {
+		w.msgs[i].hdr.Iov = &w.iovs[i]
+		w.msgs[i].hdr.SetIovlen(1)
+	}
+	w.flush = w.sendmmsg
+	return w, nil
 }
 
 func (w *rawWriter) WritePacketData(frame []byte) error {
@@ -63,6 +85,49 @@ func (w *rawWriter) WritePacketData(frame []byte) error {
 		return nil
 	}
 	return err
+}
+
+// WritePacketDataBatch sends up to sendBatch frames with one sendmmsg. On the
+// IBRS-mitigated hosts each syscall is expensive, and KCP flushes a window as
+// a burst, so batching cuts the syscalls per frame.
+func (w *rawWriter) WritePacketDataBatch(frames [][]byte) (int, error) {
+	w.n = min(len(frames), sendBatch)
+	for i, f := range frames[:w.n] {
+		w.iovs[i].Base = &f[0]
+		w.iovs[i].SetLen(len(f))
+	}
+	err := w.rc.Write(w.flush)
+	for i := range w.n {
+		w.iovs[i].Base = nil // keep no frame alive past the call
+	}
+	if err != nil {
+		return 0, err
+	}
+	return w.sent, w.err
+}
+
+// sendmmsg reports false when the socket buffer is full, so rc.Write waits.
+func (w *rawWriter) sendmmsg(fd uintptr) bool {
+	for {
+		n, _, errno := unix.Syscall6(unix.SYS_SENDMMSG, fd, uintptr(unsafe.Pointer(&w.msgs[0])), uintptr(w.n), 0, 0, 0)
+		switch errno {
+		case 0:
+			w.sent, w.err = int(n), nil
+			return true
+		case unix.EINTR:
+			continue
+		case unix.EAGAIN:
+			return false
+		case unix.ENOBUFS:
+			// Device queue full on the first frame: drop it as WritePacketData
+			// does and report it sent, so KCP retransmits it.
+			w.sent, w.err = 1, nil
+			return true
+		default:
+			w.sent, w.err = 0, errno
+			return true
+		}
+	}
 }
 
 func (w *rawWriter) Close() { w.f.Close() }

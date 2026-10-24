@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/ipv4"
 	"golang.org/x/sys/unix"
 
 	"paqet-plus/internal/conf"
@@ -238,6 +239,61 @@ func BenchmarkRoundTripLoopback(b *testing.B) {
 		}
 		if _, _, err := pc.ReadFrom(buf); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// WriteBatch must put every frame of a batch on the wire through sendmmsg.
+func TestWriteBatchLoopback(t *testing.T) {
+	const port = 47009
+	pc, err := New(loNetwork(t, port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+
+	dst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}
+	want := [][]byte{[]byte("batch one"), []byte("batch two"), []byte("batch three")}
+	ms := make([]ipv4.Message, len(want))
+	for i := range want {
+		ms[i] = ipv4.Message{Buffers: [][]byte{want[i]}, Addr: dst}
+	}
+	if n, err := pc.WriteBatch(ms, 0); err != nil || n != len(ms) {
+		t.Fatalf("WriteBatch = %d, %v; want %d, nil", n, err, len(ms))
+	}
+
+	pc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 2048)
+	for i := range want {
+		n, _, err := pc.ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("ReadFrom %d: %v", i, err)
+		}
+		if !bytes.Equal(buf[:n], want[i]) {
+			t.Fatalf("frame %d = %q, want %q", i, buf[:n], want[i])
+		}
+	}
+}
+
+func BenchmarkSendBatchLoopback(b *testing.B) {
+	pc, err := New(loNetwork(b, 47011))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer pc.Close()
+	dst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 47012}
+	ms := make([]ipv4.Message, sendBatch)
+	for i := range ms {
+		ms[i] = ipv4.Message{Buffers: [][]byte{make([]byte, 1200)}, Addr: dst}
+	}
+	b.SetBytes(1200 * sendBatch)
+	for b.Loop() {
+		for q := ms; len(q) > 0; {
+			n, err := pc.WriteBatch(q, 0)
+			if err != nil {
+				b.Fatal(err)
+			}
+			q = q[n:]
 		}
 	}
 }

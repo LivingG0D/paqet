@@ -10,6 +10,7 @@ import (
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
+	"golang.org/x/net/ipv4"
 
 	"paqet-plus/internal/conf"
 	"paqet-plus/internal/pkg/hash"
@@ -65,6 +66,7 @@ type SendHandle struct {
 	seqSeed     uint32
 	tcpF        tcpF
 	ePool       sync.Pool
+	bPool       sync.Pool // *frameBatch
 }
 
 // fastRandUint32 returns an unpredictable uint32 for per-packet fingerprint
@@ -111,6 +113,7 @@ func newSendHandle(srcMAC net.HardwareAddr, srcPort uint16, dscp uint8) *SendHan
 		seqSeed: fastRandUint32(),
 		tcpF:    tcpF{clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
 	}
+	sh.bPool.New = func() any { return new(frameBatch) }
 	sh.ePool.New = func() any {
 		return &encoder{
 			eth: layers.Ethernet{SrcMAC: srcMAC},
@@ -198,12 +201,24 @@ func (h *SendHandle) buildTCPHeader(e *encoder, dstPort uint16, f conf.TCPF) {
 
 func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 	e := h.ePool.Get().(*encoder)
-	defer func() {
-		e.buf.Clear()
-		e.payload = nil
-		h.ePool.Put(e)
-	}()
+	defer h.putEncoder(e)
 
+	frame, err := h.encode(e, payload, addr)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(frame)
+}
+
+func (h *SendHandle) putEncoder(e *encoder) {
+	e.buf.Clear()
+	e.payload = nil
+	h.ePool.Put(e)
+}
+
+// encode builds the frame for payload in e's buffer. The frame is valid until e
+// goes back to the pool.
+func (h *SendHandle) encode(e *encoder, payload []byte, addr *net.UDPAddr) ([]byte, error) {
 	dstIP := addr.IP
 	dstPort := uint16(addr.Port)
 
@@ -227,10 +242,90 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
 	e.payload = payload
 	if err := gopacket.SerializeLayers(e.buf, opts, &e.eth, ipLayer, &e.tcp, &e.payload); err != nil {
-		return err
+		return nil, err
+	}
+	return e.buf.Bytes(), nil
+}
+
+// sendBatch is the most frames one WriteBatch call sends: kcp-go flushes its
+// queue in batches of up to 64.
+const sendBatch = 64
+
+// batchFrameWriter sends several frames in one call (on Linux, one sendmmsg)
+// and reports how many leading frames it sent.
+type batchFrameWriter interface {
+	WritePacketDataBatch(frames [][]byte) (int, error)
+}
+
+// frameBatch is the scratch space for one WriteBatch call, pooled so a batch
+// allocates nothing.
+type frameBatch struct {
+	encs   [sendBatch]*encoder
+	frames [sendBatch][]byte
+}
+
+// WriteBatch sends up to sendBatch messages, one frame each, and returns how many
+// leading messages it sent. It sends at least one or returns an error, so a
+// caller that loops until the queue is empty always makes progress.
+func (h *SendHandle) WriteBatch(ms []ipv4.Message) (int, error) {
+	bw, ok := h.handle.(batchFrameWriter)
+	if !ok {
+		for i := range ms {
+			addr, ok := ms[i].Addr.(*net.UDPAddr)
+			if !ok {
+				return partial(i, net.InvalidAddrError("invalid address"))
+			}
+			if err := h.Write(ms[i].Buffers[0], addr); err != nil {
+				return partial(i, err)
+			}
+		}
+		return len(ms), nil
 	}
 
-	return h.sendPacket(e.buf.Bytes())
+	b := h.bPool.Get().(*frameBatch)
+	n := 0
+	defer func() {
+		for i := range n {
+			h.putEncoder(b.encs[i])
+			b.encs[i], b.frames[i] = nil, nil
+		}
+		h.bPool.Put(b)
+	}()
+	for _, m := range ms[:min(len(ms), sendBatch)] {
+		addr, ok := m.Addr.(*net.UDPAddr)
+		if !ok {
+			if n == 0 {
+				return 0, net.InvalidAddrError("invalid address")
+			}
+			break // send what is built; the next call reports the bad message
+		}
+		e := h.ePool.Get().(*encoder)
+		frame, err := h.encode(e, m.Buffers[0], addr)
+		if err != nil {
+			h.putEncoder(e)
+			if n == 0 {
+				return 0, err
+			}
+			break
+		}
+		b.encs[n], b.frames[n] = e, frame
+		n++
+	}
+
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+	if h.closed {
+		return 0, net.ErrClosed
+	}
+	return bw.WritePacketDataBatch(b.frames[:n])
+}
+
+// partial reports the messages sent before err, or err when none were.
+func partial(sent int, err error) (int, error) {
+	if sent > 0 {
+		return sent, nil
+	}
+	return 0, err
 }
 
 // sendPacket writes one serialized frame to the device.

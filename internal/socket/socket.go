@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gopacket/gopacket/pcap"
+	"golang.org/x/net/ipv4"
 
 	"paqet-plus/internal/conf"
 )
@@ -81,6 +82,16 @@ func (c *PacketConn) WriteTo(data []byte, addr net.Addr) (n int, err error) {
 	}
 
 	return len(data), nil
+}
+
+// WriteBatch sends the queued messages in as few device writes as possible: on
+// Linux one sendmmsg per sendBatch frames. The vendored kcp-go
+// (third_party/kcp-go/platform_linux.go) calls it instead of WriteTo.
+func (c *PacketConn) WriteBatch(ms []ipv4.Message, flags int) (int, error) {
+	if d, ok := c.writeDeadline.Load().(time.Time); ok && !d.IsZero() && !time.Now().Before(d) {
+		return 0, os.ErrDeadlineExceeded
+	}
+	return c.sendHandle.WriteBatch(ms)
 }
 
 func (c *PacketConn) Close() error {

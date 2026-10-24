@@ -22,3 +22,6 @@ require (
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
+
+// Vendored with a write-batching hook so sends use sendmmsg on AF_PACKET (third_party/kcp-go/platform_linux.go).
+replace github.com/xtaci/kcp-go/v5 => ./third_party/kcp-go

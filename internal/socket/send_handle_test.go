@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -9,7 +10,9 @@ import (
 
 	"paqet-plus/internal/conf"
 
+	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
+	"golang.org/x/net/ipv4"
 )
 
 // newTestSendHandle builds a SendHandle with only the fields buildTCPHeader
@@ -210,5 +213,109 @@ func assertOptionKinds(t *testing.T, name string, got []layers.TCPOption, want [
 		if got[i].OptionType != k {
 			t.Errorf("%s option[%d] = %v, want %v", name, i, got[i].OptionType, k)
 		}
+	}
+}
+
+// recordingWriter is a frameWriter that keeps a copy of every frame it is given.
+type recordingWriter struct{ frames [][]byte }
+
+func (w *recordingWriter) WritePacketData(frame []byte) error {
+	w.frames = append(w.frames, append([]byte(nil), frame...))
+	return nil
+}
+
+func (w *recordingWriter) Close() {}
+
+// batchRecordingWriter also takes whole batches, as the Linux packet socket does.
+type batchRecordingWriter struct {
+	recordingWriter
+	calls int
+}
+
+func (w *batchRecordingWriter) WritePacketDataBatch(frames [][]byte) (int, error) {
+	w.calls++
+	for _, f := range frames {
+		w.recordingWriter.WritePacketData(f)
+	}
+	return len(frames), nil
+}
+
+func batchMessages(n int) []ipv4.Message {
+	dst := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 9999}
+	ms := make([]ipv4.Message, n)
+	for i := range ms {
+		ms[i] = ipv4.Message{Buffers: [][]byte{{byte(i), 'k', 'c', 'p'}}, Addr: dst}
+	}
+	return ms
+}
+
+func newBatchTestHandle(w frameWriter) *SendHandle {
+	h := newSendHandle(net.HardwareAddr{2, 0, 0, 0, 0, 1}, 12345, 0)
+	h.handle = w
+	h.srcIPv4 = net.IPv4(10, 0, 0, 1)
+	h.srcIPv4RHWA = make(net.HardwareAddr, 6)
+	h.tcpF.tcpF.Items = []conf.TCPF{{PSH: true, ACK: true}}
+	return h
+}
+
+// framePayload returns the TCP payload of an Ethernet/IPv4 frame.
+func framePayload(t *testing.T, frame []byte) []byte {
+	t.Helper()
+	pkt := gopacket.NewPacket(frame, layers.LayerTypeEthernet, gopacket.Default)
+	tcp, ok := pkt.Layer(layers.LayerTypeTCP).(*layers.TCP)
+	if !ok {
+		t.Fatalf("frame has no TCP layer: %v", pkt)
+	}
+	return tcp.Payload
+}
+
+// A device that takes batches gets the whole queue in one call: on Linux that is
+// one sendmmsg instead of one write per frame.
+func TestWriteBatchSendsQueueInOneCall(t *testing.T) {
+	w := &batchRecordingWriter{}
+	h := newBatchTestHandle(w)
+	ms := batchMessages(3)
+
+	n, err := h.WriteBatch(ms)
+	if err != nil || n != 3 {
+		t.Fatalf("WriteBatch = %d, %v; want 3, nil", n, err)
+	}
+	if w.calls != 1 {
+		t.Fatalf("device got %d batch calls, want 1", w.calls)
+	}
+	for i, f := range w.frames {
+		if got := framePayload(t, f); !bytes.Equal(got, ms[i].Buffers[0]) {
+			t.Fatalf("frame %d payload = %q, want %q", i, got, ms[i].Buffers[0])
+		}
+	}
+}
+
+// kcp-go loops until WriteBatch has taken every message, so a long queue goes
+// out in sendBatch-sized calls.
+func TestWriteBatchCapsBatchSize(t *testing.T) {
+	w := &batchRecordingWriter{}
+	h := newBatchTestHandle(w)
+	if n, err := h.WriteBatch(batchMessages(sendBatch + 10)); err != nil || n != sendBatch {
+		t.Fatalf("WriteBatch = %d, %v; want %d, nil", n, err, sendBatch)
+	}
+}
+
+// A pcap handle cannot batch, so each frame is written on its own.
+func TestWriteBatchFallsBackToSingleWrites(t *testing.T) {
+	w := &recordingWriter{}
+	h := newBatchTestHandle(w)
+	if n, err := h.WriteBatch(batchMessages(3)); err != nil || n != 3 {
+		t.Fatalf("WriteBatch = %d, %v; want 3, nil", n, err)
+	}
+	if len(w.frames) != 3 {
+		t.Fatalf("device got %d frames, want 3", len(w.frames))
+	}
+}
+
+func TestWriteBatchAfterClose(t *testing.T) {
+	h := newBatchTestHandle(&batchRecordingWriter{})
+	h.Close()
+	if _, err := h.WriteBatch(batchMessages(2)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("WriteBatch after Close = %v, want net.ErrClosed", err)
 	}
 }
