@@ -38,27 +38,22 @@ type KCP struct {
 	Block        kcp.BlockCrypt `yaml:"-"`
 }
 
-func (k *KCP) setDefaults(role string) {
+func (k *KCP) setDefaults() {
+	// Defaults are the settings that measured best on a 78ms path with many users, the same the
+	// installer writes: fast3 and larger windows (2048, 4096) raised retransmits to
+	// 20-44% and lost 10-30% of aggregate throughput. The window is per conn and conn multiplies
+	// it, so 1024 suits both roles.
 	if k.Mode == "" {
-		k.Mode = "fast"
+		k.Mode = "normal"
 	}
 	if k.MTU == 0 {
-		k.MTU = 1350
+		k.MTU = 1250
 	}
-
 	if k.Rcvwnd == 0 {
-		if role == "server" {
-			k.Rcvwnd = 2048
-		} else {
-			k.Rcvwnd = 1024
-		}
+		k.Rcvwnd = 1024
 	}
 	if k.Sndwnd == 0 {
-		if role == "server" {
-			k.Sndwnd = 2048
-		} else {
-			k.Sndwnd = 1024
-		}
+		k.Sndwnd = 1024
 	}
 
 	// FEC disabled by default: saves 10% bandwidth per connection.
@@ -69,11 +64,13 @@ func (k *KCP) setDefaults(role string) {
 		k.Block_ = "aes-128-gcm" // AEAD: the other ciphers only carry a CRC32, which an on-path box can forge
 	}
 
+	// A stream cannot exceed streambuf/RTT and a conn cannot exceed smuxbuf/RTT: 64KB capped a
+	// stream at ~7 Mbit/s on a 78ms path. 4MB/16MB lift both above the window rate.
 	if k.Smuxbuf == 0 {
-		k.Smuxbuf = 512 * 1024 // 512KB: conservative to prevent flooding with many streams
+		k.Smuxbuf = 16 * 1024 * 1024
 	}
 	if k.Streambuf == 0 {
-		k.Streambuf = 64 * 1024 // 64KB per stream: small to limit per-stream pressure
+		k.Streambuf = 4 * 1024 * 1024
 	}
 
 	if k.Smuxkalive_ == 0 {

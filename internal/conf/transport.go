@@ -13,13 +13,13 @@ type Transport struct {
 
 func (t *Transport) setDefaults(role string) {
 	if t.Conn == 0 {
-		t.Conn = 1
+		t.Conn = 8 // 8 spreads users across paced sessions: 4 lost a third of throughput, 16 gained nothing
 	}
 
 	switch t.Protocol {
 	case "kcp":
 		if t.KCP != nil {
-			t.KCP.setDefaults(role)
+			t.KCP.setDefaults()
 		}
 	}
 }

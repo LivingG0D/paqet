@@ -51,11 +51,11 @@ server:
 # Transport protocol configuration
 transport:
   protocol: "kcp"  # Transport protocol (currently only "kcp" supported)
-  conn: 4          # Number of connections (1-256, default: 1)
+  conn: 8          # Number of connections (1-256, default: 8)
 
   # KCP protocol settings
   kcp:
-    mode: "fast"              # KCP mode: normal, fast, fast2, fast3, manual
+    mode: "normal"            # KCP mode: normal (default), fast, fast2, fast3, manual
 
     # Manual mode parameters (only used when mode="manual")
     # nodelay: 1              # 0=disable, 1=enable
@@ -84,9 +84,9 @@ transport:
                               # false = batch ACKs (more bandwidth efficient)
                               # Setting true reduces latency but increases bandwidth usage
 
-    # mtu: 1350              # Maximum transmission unit (50-1500)
-    # rcvwnd: 256            # Receive window size (default for client)  
-    # sndwnd: 256            # Send window size (default for client)
+    # mtu: 1250              # Maximum transmission unit (50-1500, default: 1250)
+    # rcvwnd: 1024           # Receive window size (default: 1024)
+    # sndwnd: 1024           # Send window size (default: 1024; 2048+ raised loss on a shared path)
 
     # Forward Error Correction (FEC) - recovers lost packets without retransmission
     # dshard: 10             # Data shards (default: 10)
@@ -101,14 +101,13 @@ transport:
     # Buffer settings (optional). These are a throughput ceiling on any link
     # with latency: a single stream cannot exceed streambuf/RTT, and one
     # connection cannot exceed smuxbuf/RTT, no matter how fast the path is.
-    # The defaults are deliberately small to bound memory when many streams
-    # are active — at 37ms RTT they work out to roughly:
-    #     streambuf  64KB (default) -> ~14 Mbit/s per stream
-    #     smuxbuf   512KB (default) -> ~110 Mbit/s per connection
-    # Raise both for a fast link carrying few streams; leave them alone when
-    # serving many concurrent users, which is what they are tuned for.
-    # smuxbuf: 16777216      # 16MB
-    # streambuf: 4194304     # 4MB
+    # The defaults lift both above the window rate; they bound memory at
+    # smuxbuf per connection (16MB x 8 conns = 128MB worst case). At 78ms RTT:
+    #     streambuf  4MB (default) -> ~400 Mbit/s per stream
+    #     smuxbuf   16MB (default) -> ~1.7 Gbit/s per connection
+    # Lower them on a small-memory host.
+    # smuxbuf: 16777216      # 16MB (default)
+    # streambuf: 4194304     # 4MB (default)
 
     # smuxkalive: 30      # SMUX keepalive interval (seconds, default 30)
     # smuxktimeout: 90    # SMUX keepalive timeout (seconds, default 90)

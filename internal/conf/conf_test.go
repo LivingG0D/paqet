@@ -118,3 +118,21 @@ transport:
 		})
 	}
 }
+
+// A config that leaves the tuning keys out must get the settings that measured best on the
+// live pair (78ms path, many users): the same ones the installer writes.
+func TestTuningDefaultsMatchMeasuredBest(t *testing.T) {
+	for _, role := range []string{"client", "server"} {
+		tr := &Transport{Protocol: "kcp", KCP: &KCP{Key: "k"}}
+		tr.setDefaults(role)
+		k := tr.KCP
+		if tr.Conn != 8 || k.Mode != "normal" || k.MTU != 1250 || k.Sndwnd != 1024 || k.Rcvwnd != 1024 ||
+			k.Smuxbuf != 16*1024*1024 || k.Streambuf != 4*1024*1024 {
+			t.Errorf("%s defaults: conn %d mode %q mtu %d sndwnd %d rcvwnd %d smuxbuf %d streambuf %d; want 8 normal 1250 1024 1024 16MB 4MB",
+				role, tr.Conn, k.Mode, k.MTU, k.Sndwnd, k.Rcvwnd, k.Smuxbuf, k.Streambuf)
+		}
+		if errs := tr.validate(); len(errs) != 0 {
+			t.Errorf("%s defaults fail validation: %v", role, errs)
+		}
+	}
+}

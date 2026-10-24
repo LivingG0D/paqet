@@ -41,4 +41,5 @@ var Cmd = &cobra.Command{
 
 func initialize(cfg *conf.Conf) {
 	flog.SetLevel(cfg.Log.Level)
+	capProcs()
 }

@@ -95,10 +95,10 @@ network:
     sockbuf: 8388608           # 8MB buffer (bytes)
 transport:
   protocol: "kcp"
-  conn: 1
+  conn: 8                      # default
   kcp:
-    mode: "fast"               # normal, fast, fast2, fast3, manual
-    mtu: 1350
+    mode: "normal"             # default; normal, fast, fast2, fast3, manual
+    mtu: 1250                  # default
     key: "your-secret-key"
     block: "aes-128-gcm"       # default; must match the client
 ```
@@ -120,9 +120,9 @@ server:
   addr: "10.0.0.100:9999"
 transport:
   protocol: "kcp"
-  conn: 1
+  conn: 8
   kcp:
-    mode: "fast"
+    mode: "normal"
     key: "your-secret-key"
     block: "aes-128-gcm"
 ```
