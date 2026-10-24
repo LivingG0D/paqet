@@ -159,6 +159,14 @@ install -d -m 0755 "$INSTALL_DIR"
 
 say "${Y}Release${N}: looking up the latest paqet-plus release..."
 LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" | jq -r '.[0].tag_name' 2>/dev/null || true)
+FROM_API=1
+if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = null ]; then
+  # The API allows 60 calls an hour per IP, which hosts behind a shared address use up. The
+  # releases/latest page redirects to the newest tag without that limit (it skips prereleases).
+  FROM_API=''
+  LATEST_TAG=$(curl -fsS --connect-timeout 15 -o /dev/null -w '%{redirect_url}' "https://github.com/$REPO/releases/latest" 2>/dev/null \
+    | sed -n 's#.*/releases/tag/##p' || true)
+fi
 VERSION='' ASSET_NAME=''
 # Releases from before the rename ship paqet-linux-* archives holding paqet_linux_*.
 find_asset() { # tag -> the archive name that release has for this arch, if any
@@ -171,6 +179,11 @@ if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = null ]; then
   bad "Could not fetch the latest release (GitHub API rate limit or no network)."
   ask "Version to install (e.g. v1.0.0-alpha.36): "
   VERSION=$REPLY
+elif [ -z "$FROM_API" ]; then
+  # No API to list the assets: assume the current archive name. If the pipeline has not
+  # uploaded it yet, the download below fails and says so.
+  VERSION=$LATEST_TAG
+  good "Latest release: $VERSION"
 else
   # A release can exist before its assets are uploaded: the build pipeline needs a few minutes.
   ASSET_NAME=$(find_asset "$LATEST_TAG")
@@ -184,7 +197,7 @@ else
 fi
 if [ -z "$VERSION" ]; then VERSION=$LATEST_TAG; fi
 # A typed version: ask the release which name it uses, else assume the current one.
-[ -n "$ASSET_NAME" ] || ASSET_NAME=$(find_asset "$VERSION")
+[ -n "$ASSET_NAME" ] || [ -z "$FROM_API" ] || ASSET_NAME=$(find_asset "$VERSION")
 [ -n "$ASSET_NAME" ] || ASSET_NAME="$BIN_NAME-linux-$FILENAME-$VERSION.tar.gz"
 case $ASSET_NAME in
   paqet-linux-*) BINARY_NAME="paqet_linux_$FILENAME" ;;
